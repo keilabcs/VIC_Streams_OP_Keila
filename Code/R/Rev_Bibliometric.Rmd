@@ -1,0 +1,46 @@
+---
+title: "bibliometric"
+output: html_document
+date: "2024-06-18"
+---
+
+
+instale as dependecias necessarias 
+install.packages("websocket")
+update.packages(ask = FALSE)
+
+
+
+```{r}
+install.packages("bibliometrix")
+```
+
+```{r}
+library(bibliometrix)
+```
+
+Fazer um revisao bibliografica sistematica
+estou comecando apenas com esse artigo esse resultados apenas preliminares mais estou querendo lhe mostrar para ver se voce concorda.
+registro completo com artigos citados 
+
+```{r}
+biblioshiny
+```
+
+
+
+```{r}
+# Verificar e instalar o pacote websocket
+if (!requireNamespace("websocket", quietly = TRUE)) {
+  install.packages("websocket")
+}
+
+# Tentar novamente iniciar o Biblioshiny
+library(bibliometrix)
+biblioshiny()
+```
+
+
+
+
+

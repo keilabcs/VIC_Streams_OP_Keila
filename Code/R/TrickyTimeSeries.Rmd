@@ -1,0 +1,2650 @@
+---
+title: "Tricky Time Series"
+author: "Alejandro C. Frery and Keila Barbosa"
+date: "2024-07-26"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+<!-- ### A time series that might challenge.  -->
+<!-- It is immediate to add other distributions to the first half, as well as other models to the second half. The larger k is, the more correlated the data in the second half are.  -->
+
+<!-- ```{r setup, include=FALSE} -->
+<!-- knitr::opts_chunk$set(echo = TRUE) -->
+
+<!-- library(ggplot2) -->
+<!-- library(ggthemes) -->
+
+<!-- # From https://stackoverflow.com/questions/8697567/how-to-simulate-pink-noise-in-r -->
+<!-- TK95 <- function(N, alpha = 1){  -->
+<!--     f <- seq(from=0, to=pi, length.out=(N/2+1))[-c(1,(N/2+1))] # Fourier frequencies -->
+<!--     f_ <- 1 / f^alpha # Power law -->
+<!--     RW <- sqrt(0.5*f_) * rnorm(N/2-1) # for the real part -->
+<!--     IW <- sqrt(0.5*f_) * rnorm(N/2-1) # for the imaginary part -->
+<!--     fR <- complex(real = c(rnorm(1), RW, rnorm(1), RW[(N/2-1):1]),  -->
+<!--                   imaginary = c(0, IW, 0, -IW[(N/2-1):1]), length.out=N) -->
+<!--      # Those complex numbers that are to be back transformed for Fourier Frequencies 0, 2pi/N, 2*2pi/N, ..., pi, ..., 2pi-1/N  -->
+<!--      # Choose in a way that frequencies are complex-conjugated and symmetric around pi  -->
+<!--      # 0 and pi do not need an imaginary part -->
+<!--     reihe <- fft(fR, inverse=TRUE) # go back into time domain -->
+<!--     return(Re(reihe)) # imaginary part is 0 -->
+<!-- } -->
+<!-- ``` -->
+
+<!-- We will build tricky time series. -->
+<!-- They will be comprised to two parts: -->
+<!-- \begin{enumerate} -->
+<!-- \item The first half will consist of batches of observations from independent identically distributed random variables (white noise) with zero mean and unitary standard deviation. -->
+<!-- We will use the following random variables: -->
+<!--   \begin{itemize} -->
+<!--   \item Standard Gaussian law: $Y_1\sim\text{N}(0,1)$. -->
+<!--   \item Scaled Uniform distribution $Y_2=\sqrt{12}(U-1/2)$, with $U\sim\text{U}(0,1)$. -->
+<!--   \item Noncentral Exponential distribution: $Y_3=Y-1$, with $Y\sim\text{E}(1)$. -->
+<!--   \end{itemize} -->
+<!-- \item The second half will consist of observations of $1/f^k$ noise, with $k>0$ (coloured noise). These observations are standardized (zero mean, unitary variance). -->
+<!-- \end{enumerate} -->
+
+<!-- ```{r Simulation} -->
+
+<!-- # n is the length of each batch; the output will be 6n (three batches followed by the 1/f^k series of length n) -->
+<!-- # k controls the correlation of the 1/f^k noise -->
+
+<!-- TrickyTimeSeries <- function(n, k){ -->
+<!--   y1 <- rnorm(n) -->
+<!--   y2 <- sqrt(12)*runif(n, min=-1/2, max=1/2) -->
+<!--   y3 <- rexp(n)-1 -->
+<!--   fk <- TK95(N=3*n, alpha=k) -->
+<!--   fk <- (fk-mean(fk))/sd(fk) -->
+
+<!--   output <- c(y1, y2, y3, fk) -->
+<!--   return(output) -->
+<!-- } -->
+<!-- ``` -->
+
+<!-- Run and visualize -->
+
+<!-- ```{r RunSee} -->
+
+<!-- # Always set up the generator and its seed -->
+<!-- set.seed(1234567890, kind="Mersenne-Twister") -->
+
+<!-- y=TrickyTimeSeries(n=100, k=1) -->
+
+<!-- Tricky <- data.frame(x=1:600, -->
+<!--                      y=y) -->
+
+<!-- ggplot(Tricky, aes(x=x, y=y)) + -->
+<!--   geom_line() + -->
+<!--   theme_tufte() -->
+
+<!-- ``` -->
+
+
+### Functions and Packages
+
+```{r}
+# Packages
+library(pracma)
+library(ggplot2)
+library(ggthemes)
+library(statcomp)
+```
+
+
+```{r}
+knitr::opts_chunk$set(echo = TRUE)
+# Functions
+
+# Função para calcular padrões ordinais usando statcomp
+ordinal_patterns_statcomp <- function(series, emb_dim) {
+  if (length(series) < emb_dim) {
+    stop("A série temporal é muito curta para a dimensão de embedding especificada.")
+  }
+  # Utilizando a função from `statcomp` para calcular os padrões ordinais
+  patterns <- ordinal_pattern(series, emb_dim)
+  return(patterns)
+}
+
+# Função ADWIN ajustada para padrões ordinais
+ADWIN <- function(delta = 0.002) {
+  width <- 0
+  total <- 0
+  variance <- 0
+  window <- numeric(0)
+  
+  update <- function(value) {
+    width <<- width + 1
+    window <<- c(window, value)
+    total <<- total + value
+    if (width > 1) {
+      variance <<- var(window, na.rm = TRUE) # Calcula a variância, removendo NAs
+    }
+    if (width > 1 && detect_change()) {
+      return(TRUE)
+    }
+    return(FALSE)
+  }
+  
+  detect_change <- function() {
+    mean_val <- mean(window, na.rm = TRUE) # Calcula a média, removendo NAs
+    for (n in 1:(width - 1)) {
+      mean0 <- mean(window[1:n], na.rm = TRUE)
+      mean1 <- mean(window[(n + 1):width], na.rm = TRUE)
+      if (is.na(mean0) || is.na(mean1)) next # Pula iteração se a média for NA
+      if (abs(mean0 - mean1) > sqrt((variance / n) + (variance / (width - n))) * qnorm(1 - delta)) {
+        window <<- window[(n + 1):width]
+        width <<- length(window)
+        total <<- sum(window, na.rm = TRUE)
+        variance <<- var(window, na.rm = TRUE)
+        return(TRUE)
+      }
+    }
+    return(FALSE)
+  }
+  
+  list(update = update)
+}
+
+# Função para criar a série temporal
+TrickyTimeSeries <- function(n, k){
+  y1 <- rnorm(n)
+  y2 <- sqrt(12)*runif(n, min=-1/2, max=1/2)
+  y3 <- rexp(n)-1
+  fk <- TK95(N=3*n, alpha=k)
+  fk <- (fk-mean(fk))/sd(fk)
+  output <- c(y1, y2, y3, fk)
+  return(output)
+}
+
+# Função para gerar ruído colorido
+TK95 <- function(N, alpha = 1){ 
+    f <- seq(from=0, to=pi, length.out=(N/2+1))[-c(1,(N/2+1))] # Frequências de Fourier
+    f_ <- 1 / f^alpha # Lei de potência
+    RW <- sqrt(0.5*f_) * rnorm(N/2-1) # Parte real
+    IW <- sqrt(0.5*f_) * rnorm(N/2-1) # Parte imaginária
+    fR <- complex(real = c(rnorm(1), RW, rnorm(1), RW[(N/2-1):1]), 
+                  imaginary = c(0, IW, 0, -IW[(N/2-1):1]), length.out=N)
+    reihe <- fft(fR, inverse=TRUE) # Retornar ao domínio do tempo com transformada inversa de Fourier
+    return(Re(reihe)) # Retorna apenas a parte real
+}
+
+# Função para calcular padrões ordinais para uma série temporal dada uma dimensão de embedding.
+# Patterns: Vetor com os padrões ordinais calculados
+# series: A série temporal de entrada
+# emb_dim: Dimensão de embedding (por exemplo, 3)
+
+# ordinal_patterns <- function(series, emb_dim) {
+#   n <- length(series)
+#   if (n < emb_dim) {
+#     stop("A série temporal é muito curta para a dimensão de embedding especificada.")
+#   }
+# 
+#   patterns <- numeric(n - emb_dim + 1)
+#   for (i in 1:(n - emb_dim + 1)) {
+#     subseq <- series[i:(i + emb_dim - 1)]
+#     ranks <- rank(subseq, ties.method = "first")
+#     pattern <- sum((ranks - 1) * (emb_dim ^ (0:(emb_dim - 1))))
+#     patterns[i] <- pattern
+#   }
+#   return(patterns)
+# }
+
+```
+
+### Change Detected vs. Drift: Exemplos Reais
+
+#### Change Detected (Mudança Detectada)
+
+Se uma mudança é detectada (retorna TRUE), isso significa que houve uma alteração significativa nos dados, de acordo com o critério estatístico definido.
+
+**Exemplo:**
+
+Imagine que estamos monitorando a temperatura de uma sala de servidores. A temperatura é normalmente estável em torno de 22°C, mas de repente o sistema de ar condicionado falha, fazendo com que a temperatura suba rapidamente para 30°C.
+
+```{r}
+# Dados simulados de temperatura
+set.seed(123)
+temperature_stream <- c(rnorm(100, mean = 22, sd = 0.5), rnorm(100, mean = 30, sd = 0.5))
+
+# Inicializa o detector ADWIN com diferentes valores de delta
+deltas <- c(0.001, 0.002, 0.005)
+results <- list()
+
+for (delta in deltas) {
+  adwin_temp <- ADWIN(delta = delta)
+  change_points_temp <- numeric(0)
+  
+  # Processa o fluxo de dados
+  for (i in 1:length(temperature_stream)) {
+    if (adwin_temp$update(temperature_stream[i])) {
+      change_points_temp <- c(change_points_temp, i)
+    }
+  }
+  
+  # Definir os pontos de mudança verdadeiros
+  true_change_points <- c(101)
+  
+  # Calcular Precision, Recall e F1 Score
+  tp <- sum(change_points_temp %in% true_change_points)
+  fp <- length(change_points_temp) - tp
+  fn <- length(true_change_points) - tp
+  
+  precision <- tp / (tp + fp)
+  recall <- tp / (tp + fn)
+  f1_score <- 2 * ((precision * recall) / (precision + recall))
+  
+  results[[paste("Delta =", delta)]] <- list(
+    delta = delta,
+    change_points = change_points_temp,
+    precision = precision,
+    recall = recall,
+    f1_score = f1_score
+  )
+}
+
+# Plotar os dados e os pontos de mudança para o melhor delta
+best_result <- results[[which.max(sapply(results, function(x) x$f1_score))]]
+df_temp <- data.frame(
+  index = 1:length(temperature_stream),
+  value = temperature_stream,
+  change = ifelse(1:length(temperature_stream) %in% best_result$change_points, "Change Detected", "No Change")
+)
+
+ggplot(df_temp, aes(x = index, y = value)) +
+  geom_line() +
+  geom_point(data = subset(df_temp, change == "Change Detected"), aes(x = index, y = value), color = "red", size = 2) +
+  labs(title = paste("Detecção de Mudança na Temperatura da Sala de Servidores\nDelta =", best_result$delta),
+       x = "Índice", y = "Temperatura (°C)") +
+  theme_minimal()
+
+# Exibir resultados
+print("Resultados para diferentes valores de delta:")
+for (result in results) {
+  cat("Delta:", result$delta, "\n")
+  cat("Pontos de Mudança Detectados:", result$change_points, "\n")
+  cat("Precision:", result$precision, "\n")
+  cat("Recall:", result$recall, "\n")
+  cat("F1 Score:", result$f1_score, "\n\n")
+}
+
+```
+*Resultado:*
+
+Neste caso, o ADWIN detecta uma mudança significativa quando a temperatura sobe de 22°C para 30°C devido à falha no sistema de ar condicionado.
+
+
+#### Drift (Deriva)
+
+Embora o *ADWIN possa detectar mudanças abruptas, ele não é especificamente projetado para detectar drift gradual*. No entanto, se um drift gradual acumular uma mudança significativa que ultrapassa o limiar, ele pode ser detectado como uma mudança.
+
+Drift gradual é um tipo de mudança nos dados em que as propriedades estatísticas dos dados mudam lentamente ao longo do tempo. Isso contrasta com mudanças abruptas, onde há uma mudança repentina e significativa nas propriedades dos dados.
+
+*Características do Drift Gradual*
+
+1. *Lento e Contínuo*: O drift gradual ocorre de forma lenta e contínua, em vez de uma mudança súbita.
+
+2. *Dificuldade de Detecção*: Pode ser mais difícil de detectar porque as mudanças são pequenas em cada passo, mas acumulam ao longo do tempo.
+
+3. *Acúmulo de Efeito*: Embora cada pequena mudança possa não ser significativa por si só, o efeito acumulado ao longo do tempo pode levar a uma mudança significativa que pode ser detectada.
+
+- Embora o *ADWIN* seja eficaz na detecção de mudanças abruptas, ele pode não ser tão eficaz na detecção de drift gradual devido à natureza do algoritmo, que é projetado para detectar mudanças estatisticamente significativas em janelas de dados. No entanto, se o drift gradual acumular uma mudança significativa que ultrapassa o limiar estatístico definido pelo delta, ele pode ser detectado como uma mudança.
+
+- Mudanças Abruptas: ADWIN é bom para detectar mudanças abruptas porque essas mudanças causam uma diferença estatisticamente significativa na janela de dados, o que aciona a detecção.
+
+
+*Exemplo de Drift:*
+
+Digamos que estamos monitorando a demanda de energia elétrica em um bairro ao longo de um ano. No verão, a demanda de energia aumenta gradualmente devido ao maior uso de ar condicionado.
+
+```{r}
+set.seed(123)
+# Dados simulados de demanda de energia
+energy_demand_stream <- c(rnorm(100, mean = 50, sd = 2), rnorm(100, mean = 60, sd = 2))
+
+# Parâmetros delta a testar
+delta_values <- c(0.001, 0.002, 0.005)
+results <- list()
+
+for (delta in delta_values) {
+  # Inicializa o detector ADWIN
+  adwin_energy <- ADWIN(delta = delta)
+  
+  # Vetor para armazenar os pontos de detecção de mudança
+  change_points_energy <- numeric(0)
+  
+  # Processa o fluxo de dados
+  for (i in 1:length(energy_demand_stream)) {
+    if (adwin_energy$update(energy_demand_stream[i])) {
+      change_points_energy <- c(change_points_energy, i)
+    }
+  }
+  
+  # Definir os pontos de mudança verdadeiros
+  true_change_points <- c(101)
+  
+  # Calcular Precision, Recall e F1 Score
+  tp <- sum(change_points_energy %in% true_change_points)
+  fp <- length(change_points_energy) - tp
+  fn <- length(true_change_points) - tp
+  
+  precision <- ifelse((tp + fp) == 0, 0, tp / (tp + fp))
+  recall <- ifelse((tp + fn) == 0, 0, tp / (tp + fn))
+  f1_score <- ifelse((precision + recall) == 0, 0, 2 * ((precision * recall) / (precision + recall)))
+  
+  results[[paste("Delta =", delta)]] <- list(
+    delta = delta,
+    change_points = change_points_energy,
+    precision = precision,
+    recall = recall,
+    f1_score = f1_score
+  )
+}
+
+# Plotar os dados e os pontos de mudança para o melhor delta
+best_result <- results[[which.max(sapply(results, function(x) x$f1_score))]]
+df_energy <- data.frame(
+  index = 1:length(energy_demand_stream),
+  value = energy_demand_stream,
+  change = ifelse(1:length(energy_demand_stream) %in% best_result$change_points, "Change Detected", "No Change")
+)
+
+ggplot(df_energy, aes(x = index, y = value)) +
+  geom_line() +
+  geom_point(data = subset(df_energy, change == "Change Detected"), aes(x = index, y = value), color = "red", size = 2) +
+  labs(title = paste("Energy Demand Change Detection\nDelta =", best_result$delta),
+       x = "Índice", y = "Demanda de Energia (kW)") +
+  theme_minimal()
+
+# Exibir resultados
+print("Resultados para diferentes valores de delta:")
+for (result in results) {
+  cat("Delta:", result$delta, "\n")
+  cat("Pontos de Mudança Detectados:", result$change_points, "\n")
+  cat("Precision:", result$precision, "\n")
+  cat("Recall:", result$recall, "\n")
+  cat("F1 Score:", result$f1_score, "\n\n")
+}
+
+```
+*Resultado:*
+
+Neste caso, a demanda de energia aumenta gradualmente. O ADWIN pode detectar uma mudança significativa quando a demanda acumulada ao longo do tempo ultrapassa o limiar, indicando um drift.
+
+- **Change Detected**: Exemplifica mudanças abruptas e significativas nos dados, como uma falha no sistema de ar condicionado que causa um aumento súbito na temperatura.
+
+- **Drift**: Representa mudanças graduais nos dados, que podem eventualmente ser detectadas como uma mudança significativa, como o aumento gradual da demanda de energia durante o verão.
+
+Ambos os exemplos ilustram como o ADWIN pode ser utilizado para detectar diferentes tipos de mudanças em fluxos de dados, oferecendo uma abordagem robusta para monitoramento e análise. Além disso, o uso de padrões ordinais de Bandt e Pompe em conjunto com o ADWIN pode melhorar a capacidade de detecção de mudanças, tornando o algoritmo mais sensível a variações estruturais. Isso é particularmente útil em cenários onde as mudanças não são apenas de amplitude, mas também de comportamento.
+
+____________________________________________________________________________________________________
+### Algoritmo ADWIN (Adaptive Windowing) por Bifet
+
+O ADWIN é um algoritmo que ajusta dinamicamente o tamanho de uma janela deslizante de dados e verifica se houve uma mudança significativa na distribuição dos dados.
+
+
+#### Funcionamento do ADWIN
+
+1. **Janela Deslizante Dinâmica:** ADWIN mantém uma janela de dados que pode aumentar ou diminuir de tamanho conforme necessário para detectar mudanças.
+
+2. **Divisão da Janela:** A janela é dividida em duas sub-janelas: \( W_0 \) e \( W_1 \). A média das duas sub-janelas é comparada para verificar mudanças.
+
+3. **Teste de Mudança:** Se a diferença entre as médias das sub-janelas exceder um limite estatístico baseado na variância e no tamanho das janelas, ADWIN conclui que houve uma mudança.
+
+4. **Ajuste da Janela:** Quando uma mudança é detectada, ADWIN reduz a janela para excluir os dados antigos e manter os novos dados que representam o novo conceito.
+
+
+#### Cenário 1: Detecção de Estabilidade
+
+Suponha que estamos monitorando um fluxo de dados de temperatura.
+
+1. **Inicialização:** Os primeiros dados de temperatura são inseridos na janela:
+   \[
+   W = [20, 21, 19, 20, 21, 20, 21, 20]
+   \]
+2. **Divisão da Janela:** A janela é dividida em duas sub-janelas:
+   \[
+   W_0 = [20, 21, 19, 20] \quad \text{e} \quad W_1 = [21, 20, 21, 20]
+   \]
+3. **Cálculo das Médias:**
+   \[
+   \text{Média}(W_0) = 20 \quad \text{e} \quad \text{Média}(W_1) = 20.5
+   \]
+4. **Teste de Mudança:** A diferença entre as médias é pequena, então nenhuma mudança é detectada.
+
+
+##### Cenário 2: Detecção de Mudança
+
+Agora, os dados mudam devido a uma alteração no ambiente:
+
+1. **Novos Dados:** Dados adicionais mostram um aumento de temperatura:
+   \[
+   W = [20, 21, 19, 20, 21, 20, 21, 20, 25, 26, 25, 27]
+   \]
+2. **Divisão da Janela:** A janela é dividida em duas sub-janelas:
+   \[
+   W_0 = [20, 21, 19, 20, 21, 20] \quad \text{e} \quad W_1 = [21, 20, 25, 26, 25, 27]
+   \]
+3. **Cálculo das Médias:**
+   \[
+   \text{Média}(W_0) = 20.1667 \quad \text{e} \quad \text{Média}(W_1) = 24
+   \]
+4. **Teste de Mudança:** A diferença entre as médias é significativa, indicando uma mudança de conceito. ADWIN ajusta a janela para:
+   \[
+   W = [25, 26, 25, 27]
+   \]
+
+#### Implementação em R
+
+```{r}
+## FUNÇÃO ADWIN
+
+# Neste exemplo, o ADWIN detectará a mudança quando os dados passarem de 20 para 25 e ajustará a janela para refletir o novo conceito
+
+# ADWIN (Adaptive Windowing): monitora uma janela de dados em constante mudança. Quando os dados mais recentes na janela diferem estatisticamente dos dados mais antigos, uma mudança é detectada. O parâmetro delta controla a sensibilidade do detector.
+
+ADWIN <- function(delta = 0.002) {
+  # Inicializa as variáveis
+  width <- 0 # Tamanho da janela
+  total <- 0 # Soma dos valores na janela
+  variance <- 0 # Variância dos valores na janela
+  window <- numeric(0) # Vetor que armazena os valores na janela
+  
+  # Função para atualizar o ADWIN com um novo valor
+  # Função update: Adiciona um novo valor à janela e verifica se houve uma mudança significativa nos dados.
+  update <- function(value) {
+    width <<- width + 1 # Incrementa o tamanho da janela
+    window <<- c(window, value) # Adiciona o novo valor à janela
+    total <<- total + value # Atualiza a soma total
+    if (width > 1) {
+      variance <<- var(window) # Calcula a variância se a janela tiver mais de um valor
+    }
+    # Checa por concept drift
+    # Função detect_change: Verifica se a média dos dados mais recentes na janela é significativamente diferente da média dos       dados antigos, ajustando a janela conforme necessário para manter a sensibilidade às mudanças.
+    if (width > 1 && detect_change()) {
+      return(TRUE) # Retorna TRUE se uma mudança for detectada
+    }
+    return(FALSE) # Retorna FALSE se nenhuma mudança for detectada
+  }
+  
+  # Função para detectar mudança
+  detect_change <- function() {
+    mean_val <- mean(window) # Calcula a média dos valores na janela
+    for (n in 1:(width - 1)) {
+      # Divide a janela em duas sub-janelas e calcula as médias de cada sub-janela
+      mean0 <- mean(window[1:n])
+      mean1 <- mean(window[(n + 1):width])
+      # Compara as médias das sub-janelas usando um teste estatístico
+      if (abs(mean0 - mean1) > sqrt((variance / n) + (variance / (width - n))) * qnorm(1 - delta)) {
+        # Se uma mudança for detectada, ajusta a janela para descartar os dados antigos
+        window <<- window[(n + 1):width]
+        width <<- length(window)
+        total <<- sum(window)
+        variance <<- var(window)
+        return(TRUE) # Retorna TRUE indicando que uma mudança foi detectada
+      }
+    }
+    return(FALSE) # Retorna FALSE se nenhuma mudança for detectada
+  }
+  # Retorna as funções de atualização e detecção
+  list(update = update)
+}
+```
+
+```{r}
+# Função para calcular métricas de desempenho
+calculate_metrics <- function(true_change_points, detected_change_points) {
+  tp <- sum(detected_change_points %in% true_change_points)
+  fp <- length(detected_change_points) - tp
+  fn <- length(true_change_points) - tp
+  
+  precision <- ifelse((tp + fp) == 0, 0, tp / (tp + fp))
+  recall <- ifelse((tp + fn) == 0, 0, tp / (tp + fn))
+  f1_score <- ifelse((precision + recall) == 0, 0, 2 * ((precision * recall) / (precision + recall)))
+  
+  list(precision = precision, recall = recall, f1_score = f1_score)
+}
+```
+
+
+```{r}
+# Set the seed for reproducibility
+set.seed(123)
+
+# Generate example data with two different means
+data_stream <- c(rnorm(100, mean = 20), rnorm(100, mean = 25))
+
+# Define the true change points
+true_change_points <- c(101)
+
+# Define the delta values to be tested
+delta_values <- c(0.001, 0.002, 0.005)
+
+# Initialize a data frame to store the results
+results <- data.frame()
+
+# Iterate over the delta values and calculate metrics
+for (delta in delta_values) {
+  adwin <- ADWIN(delta = delta)
+  change_points <- numeric(0)
+  
+  # Process the data stream and store detected change points
+  for (i in 1:length(data_stream)) {
+    if (adwin$update(data_stream[i])) {
+      change_points <- c(change_points, i)
+    }
+  }
+  
+  # Calculate performance metrics
+  metrics <- calculate_metrics(true_change_points, change_points)
+  
+  # Store the results
+  results <- rbind(results, data.frame(delta = delta, precision = metrics$precision, recall = metrics$recall, f1_score = metrics$f1_score))
+  
+  # Plot the data and change points for each delta value
+  df <- data.frame(
+    index = 1:length(data_stream),
+    value = data_stream,
+    change = ifelse(1:length(data_stream) %in% change_points, "Change Detected", "No Change")
+  )
+  
+  p <- ggplot(df, aes(x = index, y = value)) +
+    geom_line() +
+    geom_point(data = subset(df, change == "Change Detected"), aes(x = index, y = value), color = "red", size = 2) +
+    labs(title = paste("Change Detected with ADWIN (delta =", delta, ")"), x = "Index", y = "Value") +
+    theme_minimal() +
+    theme_tufte()
+  
+  print(p) # Ensure the plot is printed within the loop
+}
+
+# Print the results for each delta value
+print("Results for different delta values:")
+print(results)
+
+# This process detects when the data transitions from a mean of 20 to 25, adjusting the sliding window to reflect the new concept.
+
+```
+
+#### Teste Estatístico Ajustado:
+
+- O teste estatístico foi ajustado para comparar as médias das sub-janelas usando a fórmula correta para a comparação de médias com variâncias desconhecidas.
+- A comparação agora usa a soma das variâncias divididas pelo tamanho das sub-janelas para calcular o valor crítico.
+
+#### Ajuste da Janela:
+
+- Quando uma mudança é detectada, a janela é ajustada corretamente, descartando os dados antigos e recalculando a variância da nova janela.
+
+
+### Usando OP
+
+```{r}
+# Função para calcular padrões ordinais usando statcomp
+ordinal_patterns_statcomp <- function(series, emb_dim) {
+  if (length(series) < emb_dim) {
+    stop("A série temporal é muito curta para a dimensão de embedding especificada.")
+  }
+  
+  # Utilizando a função from `statcomp` para calcular os padrões ordinais
+  patterns <- ordinal_pattern(series, emb_dim)
+  
+  return(patterns)
+}
+
+```
+
+```{r}
+# Função para calcular padrões ordinais
+# Função ordinal_patterns: Esta função personalizada calcula padrões ordinais sem depender de um pacote externo.
+ordinal_patterns <- function(series, emb_dim) {
+  n <- length(series)
+  if (n < emb_dim) {
+    stop("A série temporal é muito curta para a dimensão de embedding especificada.")
+  }
+  
+  patterns <- numeric(n - emb_dim + 1)
+  for (i in 1:(n - emb_dim + 1)) {
+    subseq <- series[i:(i + emb_dim - 1)]
+    ranks <- rank(subseq, ties.method = "first")
+    pattern <- sum((ranks - 1) * (emb_dim ^ (0:(emb_dim - 1))))
+    patterns[i] <- pattern
+  }
+  return(patterns)
+}
+
+```
+
+
+```{r}
+# Função ADWIN ajustada para detectar mudanças em fluxos de dados
+# Função ADWIN: Detecta mudanças significativas na média da janela de dados.
+ADWIN <- function(delta = 0.002) {
+  width <- 0
+  total <- 0
+  variance <- 0
+  window <- numeric(0)
+  
+  update <- function(value) {
+    width <<- width + 1
+    window <<- c(window, value)
+    total <<- total + value
+    if (width > 1) {
+      variance <<- var(window, na.rm = TRUE)
+    }
+    if (width > 1 && detect_change()) {
+      return(TRUE)
+    }
+    return(FALSE)
+  }
+  
+  detect_change <- function() {
+    mean_val <- mean(window, na.rm = TRUE)
+    for (n in 1:(width - 1)) {
+      mean0 <- mean(window[1:n], na.rm = TRUE)
+      mean1 <- mean(window[(n + 1):width], na.rm = TRUE)
+      if (is.na(mean0) || is.na(mean1)) next
+      if (abs(mean0 - mean1) > sqrt((variance / n) + (variance / (width - n))) * qnorm(1 - delta)) {
+        window <<- window[(n + 1):width]
+        width <<- length(window)
+        total <<- sum(window, na.rm = TRUE)
+        variance <<- var(window, na.rm = TRUE)
+        return(TRUE)
+      }
+    }
+    return(FALSE)
+  }
+  
+  list(update = update)
+}
+
+```
+
+```{r}
+# Função para calcular métricas de desempenho
+calculate_metrics <- function(true_change_points, detected_change_points) {
+  tp <- sum(detected_change_points %in% true_change_points)
+  fp <- length(detected_change_points) - tp
+  fn <- length(true_change_points) - tp
+  
+  precision <- ifelse((tp + fp) == 0, 0, tp / (tp + fp))
+  recall <- ifelse((tp + fn) == 0, 0, tp / (tp + fn))
+  f1_score <- ifelse((precision + recall) == 0, 0, 2 * ((precision * recall) / (precision + recall)))
+  
+  list(precision = precision, recall = recall, f1_score = f1_score)
+}
+
+```
+
+
+```{r}
+# Função para executar ADWIN e calcular métricas para diferentes valores de delta
+# Função run_adwin_analysis: Executa a análise ADWIN para diferentes valores de delta, calcula métricas de desempenho e plota os resultados.
+run_adwin_analysis <- function(data_stream, true_change_points, delta_values, emb_dim) {
+  results <- data.frame(delta = numeric(), precision = numeric(), recall = numeric(), f1_score = numeric())
+  
+  for (delta in delta_values) {
+    adwin <- ADWIN(delta = delta)
+    change_points <- numeric(0)
+    
+    # Calcular padrões ordinais
+    patterns <- ordinal_patterns(data_stream, emb_dim)
+    
+    for (i in 1:length(patterns)) {
+      if (adwin$update(patterns[i])) {
+        change_points <- c(change_points, i + emb_dim - 1) # Ajuste do índice devido ao embedding dimension
+      }
+    }
+    
+    metrics <- calculate_metrics(true_change_points, change_points)
+    results <- rbind(results, data.frame(delta = delta, precision = metrics$precision, recall = metrics$recall, f1_score = metrics$f1_score))
+    
+    # Plotar os dados e os pontos de mudança
+    df <- data.frame(
+      index = 1:length(data_stream),
+      value = data_stream,
+      change = ifelse(1:length(data_stream) %in% change_points, "Change Detected", "No Change")
+    )
+    
+    print(
+      ggplot(df, aes(x = index, y = value)) +
+        geom_line() +
+        geom_point(data = subset(df, change == "Change Detected"), aes(x = index, y = value), color = "blue", size = 2) +
+        labs(title = paste("Change Detected with ADWIN and OP (delta =", delta, ")"), x = "Index", y = "Value") +
+        theme_minimal()
+    )
+  }
+  
+  return(results)
+}
+
+```
+
+```{r}
+# Visualização
+set.seed(123) # Define a semente para reprodutibilidade
+data_stream <- c(rnorm(100, mean = 20), rnorm(100, mean = 25)) # Gera dados de exemplo com duas médias diferentes
+
+# Definir os pontos de mudança verdadeiros
+true_change_points <- c(101)
+
+# Definir os valores de delta a serem testados
+delta_values <- c(0.001, 0.002, 0.005)
+
+# Definir a dimensão de embedding para os padrões ordinais
+emb_dim <- 3
+
+# Executar a análise ADWIN e calcular métricas
+results <- run_adwin_analysis(data_stream, true_change_points, delta_values, emb_dim)
+
+# Mostrar os resultados
+print("Results for different delta values:")
+print(results)
+```
+
+```{r}
+
+# Carregar bibliotecas necessárias
+library(pracma)
+library(ggplot2)
+library(ggthemes)
+
+# Função para calcular padrões ordinais
+ordinal_patterns <- function(series, emb_dim) {
+  n <- length(series)
+  if (n < emb_dim) {
+    stop("A série temporal é muito curta para a dimensão de embedding especificada.")
+  }
+  
+  patterns <- numeric(n - emb_dim + 1)
+  for (i in 1:(n - emb_dim + 1)) {
+    subseq <- series[i:(i + emb_dim - 1)]
+    ranks <- rank(subseq, ties.method = "first")
+    pattern <- sum((ranks - 1) * (emb_dim ^ (0:(emb_dim - 1))))
+    patterns[i] <- pattern
+  }
+  return(patterns)
+}
+
+# Função para calcular métricas de desempenho
+calculate_metrics <- function(true_change_points, detected_change_points) {
+  tp <- sum(detected_change_points %in% true_change_points)
+  fp <- length(detected_change_points) - tp
+  fn <- length(true_change_points) - tp
+  
+  precision <- ifelse((tp + fp) == 0, 0, tp / (tp + fp))
+  recall <- ifelse((tp + fn) == 0, 0, tp / (tp + fn))
+  f1_score <- ifelse((precision + recall) == 0, 0, 2 * ((precision * recall) / (precision + recall)))
+  
+  list(precision = precision, recall = recall, f1_score = f1_score)
+}
+
+# Função ADWIN ajustada para detectar mudanças em fluxos de dados
+ADWIN <- function(delta = 0.002) {
+  width <- 0
+  total <- 0
+  variance <- 0
+  window <- numeric(0)
+  
+  update <- function(value) {
+    width <<- width + 1
+    window <<- c(window, value)
+    total <<- total + value
+    if (width > 1) {
+      variance <<- var(window, na.rm = TRUE) 
+    }
+    if (width > 1 && detect_change()) {
+      return(TRUE)
+    }
+    return(FALSE)
+  }
+  
+  detect_change <- function() {
+    mean_val <- mean(window, na.rm = TRUE)
+    for (n in 1:(width - 1)) {
+      mean0 <- mean(window[1:n], na.rm = TRUE)
+      mean1 <- mean(window[(n + 1):width], na.rm = TRUE)
+      if (is.na(mean0) || is.na(mean1)) next
+      if (abs(mean0 - mean1) > sqrt((variance / n) + (variance / (width - n))) * qnorm(1 - delta)) {
+        window <<- window[(n + 1):width]
+        width <<- length(window)
+        total <<- sum(window, na.rm = TRUE)
+        variance <<- var(window, na.rm = TRUE)
+        return(TRUE)
+      }
+    }
+    return(FALSE)
+  }
+  
+  list(update = update)
+}
+
+# Função para executar análise ADWIN e calcular métricas
+run_adwin_analysis <- function(data_stream, true_change_points, delta_values, emb_dim) {
+  results <- data.frame(delta = numeric(), precision = numeric(), recall = numeric(), f1_score = numeric())
+  
+  for (delta in delta_values) {
+    patterns <- ordinal_patterns(data_stream, emb_dim)
+    adwin <- ADWIN(delta = delta)
+    change_points <- numeric(0)
+    
+    for (i in 1:length(patterns)) {
+      if (adwin$update(patterns[i])) {
+        change_points <- c(change_points, i + emb_dim - 1)
+      }
+    }
+    
+    metrics <- calculate_metrics(true_change_points, change_points)
+    
+    results <- rbind(results, data.frame(delta = delta, precision = metrics$precision, recall = metrics$recall, f1_score = metrics$f1_score))
+    
+    # Plotar os dados e os pontos de mudança
+    df <- data.frame(
+      index = 1:length(data_stream),
+      value = data_stream,
+      change = ifelse(1:length(data_stream) %in% change_points, "Change Detected", "No Change")
+    )
+    
+    p <- ggplot(df, aes(x = index, y = value)) +
+      geom_line() +
+      geom_point(data = subset(df, change == "Change Detected"), aes(x = index, y = value), color = "red", size = 2) +
+      labs(title = paste("Change Detected with ADWIN and OP (delta =", delta, ")"), x = "Index", y = "Value") +
+      theme_minimal()
+    
+    ggsave(filename = paste("change_detection_delta_", delta, ".png", sep = ""), plot = p)
+  }
+  
+  return(results)
+}
+
+# Exemplo de uso com visualização
+set.seed(123)
+data_stream <- c(rnorm(100, mean = 20), rnorm(100, mean = 25))
+true_change_points <- c(101)
+delta_values <- c(0.001, 0.002, 0.005)
+emb_dim <- 3
+
+# Executar a análise ADWIN e calcular métricas
+results <- run_adwin_analysis(data_stream, true_change_points, delta_values, emb_dim)
+
+# Mostrar os resultados
+print("Results for different delta values:")
+print(results)
+
+```
+
+## Comparação dos Gráficos
+
+### Sem OP (Primeira Imagem):
+
+- O ADWIN detectou mudanças principalmente após a transição dos dados de uma média de 20 para 25.
+- Há algumas detecções de mudança adicionais em torno dos pontos onde há variações mais abruptas.
+
+### Com OP (Segunda Imagem):
+
+- O ADWIN detectou mudanças em alguns pontos antes da transição principal. Isso pode indicar que o uso de padrões ordinais aumentou a sensibilidade do ADWIN, detectando mudanças mais sutis ou mudanças na estrutura dos dados.
+
+- No entanto, a detecção da transição principal (em torno do ponto 100) parece menos pronunciada, o que pode ser uma área a ser melhorada.
+
+### Sensibilidade à Mudança:
+
+- **Sem OP**: O ADWIN detecta mudanças principalmente nas áreas onde há grandes variações nos valores dos dados, o ADWIN é sensível a mudanças na média e variância dos dados.
+
+- **Com OP**: O uso de padrões ordinais permite que o ADWIN detecte mudanças mais sutis na estrutura dos dados. 
+
+A utilização de padrões ordinais adiciona uma camada adicional que pode capturar mudanças sutis na ordem dos dados, algo que a análise direta dos valores pode não captar. No entanto, isso pode levar a uma sensibilidade aumentada, *o que pode resultar em detecções de mudanças que não são imediatamente óbvias pela análise dos valores brutos*
+
+### Ajustar os parâmetros
+
+- Ajustar os parâmetros `delta` e `emb_dim` para otimizar a detecção de mudanças. Valores diferentes podem melhorar a precisão e reduzir falsos positivos.
+
+- Ajustado os parâmetros `delta` e `emb_dim` e realizar uma análise mais detalhada dos pontos de mudança detectados, incluir a capacidade de variar esses parâmetros e inspeccionar os padrões ordinais antes e após os pontos de mudança.
+
+### Análise Detalhada:
+
+- Realizar uma análise mais detalhada dos pontos de mudança detectados para entender melhor as causas das detecções. Isso pode incluir a inspeção dos padrões ordinais antes e após os pontos de mudança.
+
+O uso de padrões ordinais com o ADWIN oferece uma abordagem mais robusta para a detecção de mudanças, capturando variações na estrutura dos dados que podem não ser evidentes pela análise direta dos valores. 
+
+# Análise Detalhada dos Pontos de Mudança Sem OP
+
+```{r}
+# Função ADWIN para detectar mudanças de conceito em fluxos de dados
+ADWIN <- function(delta = 0.002) {
+  # Inicializa as variáveis
+  width <- 0 # Tamanho da janela
+  total <- 0 # Soma dos valores na janela
+  variance <- 0 # Variância dos valores na janela
+  window <- numeric(0) # Vetor que armazena os valores na janela
+  
+  # Função para atualizar o ADWIN com um novo valor
+  update <- function(value) {
+    width <<- width + 1 # Incrementa o tamanho da janela
+    window <<- c(window, value) # Adiciona o novo valor à janela
+    total <<- total + value # Atualiza a soma total
+    if (width > 1) {
+      variance <<- var(window) # Calcula a variância se a janela tiver mais de um valor
+    }
+    # Checa por concept drift
+    if (width > 1 && detect_change()) {
+      return(TRUE) # Retorna TRUE se uma mudança for detectada
+    }
+    return(FALSE) # Retorna FALSE se nenhuma mudança for detectada
+  }
+  
+  # Função para detectar mudança
+  detect_change <- function() {
+    mean_val <- mean(window) # Calcula a média dos valores na janela
+    for (n in 1:(width - 1)) {
+      # Divide a janela em duas sub-janelas e calcula as médias de cada sub-janela
+      mean0 <- mean(window[1:n])
+      mean1 <- mean(window[(n + 1):width])
+      # Compara as médias das sub-janelas usando um teste estatístico
+      if (abs(mean0 - mean1) > sqrt((variance / n) + (variance / (width - n))) * qnorm(1 - delta)) {
+        # Se uma mudança for detectada, ajusta a janela para descartar os dados antigos
+        window <<- window[(n + 1):width]
+        width <<- length(window)
+        total <<- sum(window)
+        variance <<- var(window)
+        return(TRUE) # Retorna TRUE indicando que uma mudança foi detectada
+      }
+    }
+    return(FALSE) # Retorna FALSE se nenhuma mudança for detectada
+  }
+  
+  # Retorna as funções de atualização e detecção
+  list(update = update)
+}
+
+# Exemplo de uso com visualização
+set.seed(123) # Define a semente para reprodutibilidade
+data_stream <- c(rnorm(100, mean = 20), rnorm(100, mean = 25)) # Gera dados de exemplo com duas médias diferentes
+adwin <- ADWIN(delta = 0.002) # Inicializa o detector ADWIN com delta = 0.002
+
+# Vetor para armazenar os pontos de detecção de mudança
+change_points <- numeric(0)
+
+# Processa o fluxo de dados
+for (i in 1:length(data_stream)) {
+  if (adwin$update(data_stream[i])) {
+    change_points <- c(change_points, i) # Armazena o índice onde a mudança foi detectada
+  }
+}
+
+# Plotar os dados e os pontos de mudança
+library(ggplot2)
+
+# Criar um data frame com os dados e os pontos de mudança
+df1 <- data.frame(
+  index = 1:length(data_stream),
+  value = data_stream,
+  change = ifelse(1:length(data_stream) %in% change_points, "Change Detected", "No Change")
+)
+
+# Plotar os dados
+ggplot(df1, aes(x = index, y = value)) +
+  geom_line() +
+  geom_point(data = subset(df1, change == "Change Detected"), aes(x = index, y = value), color = "red", size = 2) +
+  labs(title = "Change Detected whit ADWIN", x = "Índice", y = "Valor") +
+  theme_minimal()
+
+# Análise detalhada dos pontos de mudança
+print("Análise dos Pontos de Mudança:")
+for (point in change_points) {
+  cat("Ponto de mudança detectado em:", point, "\n")
+  if (point > 1 & point < length(data_stream)) {
+    before_change <- data_stream[(point-2):(point-1)]
+    after_change <- data_stream[(point+1):(point+2)]
+    cat("Valores antes da mudança:", before_change, "\n")
+    cat("Valores após a mudança:", after_change, "\n\n")
+  }
+}
+
+```
+## Plano HxC (Entropia de Shannon x Complexidade de Jensen-Shannon) Sem OP
+
+Para visualizar a evolução ao longo do tempo e obter vários pontos no plano HxC, é preciso calcular essas métricas em janelas deslizantes ao longo da série temporal. O plano HxC plota a entropia de Shannon (H) no eixo x e a complexidade de Jensen-Shannon (C) no eixo y para janelas deslizantes da série temporal. 
+
+```{r}
+# Carregar bibliotecas necessárias
+library(ggplot2)
+library(ggthemes)
+
+# Função para calcular a entropia de Shannon
+shannon_entropy <- function(probabilities) {
+  -sum(probabilities * log2(probabilities), na.rm = TRUE)
+}
+
+# Função para calcular a complexidade de Jensen-Shannon
+js_complexity <- function(probabilities) {
+  q <- rep(1/length(probabilities), length(probabilities))
+  m <- (probabilities + q) / 2
+  (shannon_entropy(m) - 0.5 * (shannon_entropy(probabilities) + shannon_entropy(q))) / log2(length(probabilities))
+}
+
+# Função para calcular H e C em janelas deslizantes
+calculate_hxc <- function(series, window_size) {
+  n <- length(series)
+  h_values <- c()
+  c_values <- c()
+  
+  for (i in 1:(n - window_size + 1)) {
+    window <- series[i:(i + window_size - 1)]
+    probabilities <- hist(window, plot = FALSE)$density
+    h <- shannon_entropy(probabilities)
+    c <- js_complexity(probabilities)
+    h_values <- c(h_values, h)
+    c_values <- c(c_values, c)
+  }
+  
+  data.frame(H = h_values, C = c_values)
+}
+
+# Função ADWIN para detectar mudanças de conceito em fluxos de dados
+ADWIN <- function(delta = 0.002) {
+  # Inicializa as variáveis
+  width <- 0 # Tamanho da janela
+  total <- 0 # Soma dos valores na janela
+  variance <- 0 # Variância dos valores na janela
+  window <- numeric(0) # Vetor que armazena os valores na janela
+  
+  # Função para atualizar o ADWIN com um novo valor
+  update <- function(value) {
+    width <<- width + 1 # Incrementa o tamanho da janela
+    window <<- c(window, value) # Adiciona o novo valor à janela
+    total <<- total + value # Atualiza a soma total
+    if (width > 1) {
+      variance <<- var(window) # Calcula a variância se a janela tiver mais de um valor
+    }
+    # Checa por concept drift
+    if (width > 1 && detect_change()) {
+      return(TRUE) # Retorna TRUE se uma mudança for detectada
+    }
+    return(FALSE) # Retorna FALSE se nenhuma mudança for detectada
+  }
+  
+  # Função para detectar mudança
+  detect_change <- function() {
+    mean_val <- mean(window) # Calcula a média dos valores na janela
+    for (n in 1:(width - 1)) {
+      # Divide a janela em duas sub-janelas e calcula as médias de cada sub-janela
+      mean0 <- mean(window[1:n])
+      mean1 <- mean(window[(n + 1):width])
+      # Compara as médias das sub-janelas usando um teste estatístico
+      if (abs(mean0 - mean1) > sqrt((variance / n) + (variance / (width - n))) * qnorm(1 - delta)) {
+        # Se uma mudança for detectada, ajusta a janela para descartar os dados antigos
+        window <<- window[(n + 1):width]
+        width <<- length(window)
+        total <<- sum(window)
+        variance <<- var(window)
+        return(TRUE) # Retorna TRUE indicando que uma mudança foi detectada
+      }
+    }
+    return(FALSE) # Retorna FALSE se nenhuma mudança for detectada
+  }
+  
+  # Retorna as funções de atualização e detecção
+  list(update = update)
+}
+
+# Exemplo de uso com visualização
+set.seed(123) # Define a semente para reprodutibilidade
+data_stream <- c(rnorm(100, mean = 20), rnorm(100, mean = 25)) # Gera dados de exemplo com duas médias diferentes
+adwin <- ADWIN(delta = 0.002) # Inicializa o detector ADWIN com delta = 0.002
+
+# Vetor para armazenar os pontos de detecção de mudança
+change_points <- numeric(0)
+
+# Processa o fluxo de dados
+for (i in 1:length(data_stream)) {
+  if (adwin$update(data_stream[i])) {
+    change_points <- c(change_points, i) # Armazena o índice onde a mudança foi detectada
+  }
+}
+
+# Calcular H e C em janelas deslizantes
+window_size <- 50
+hxc_data <- calculate_hxc(data_stream, window_size)
+
+# Plotar o plano HxC
+ggplot(hxc_data, aes(x = H, y = C)) +
+  geom_point(color = "blue") +
+  labs(title = "Plano HxC with ADWIN",
+       x = "Entropia de Shannon (H)", y = "Complexidade de Jensen-Shannon (C)") +
+  theme_minimal() +
+  geom_smooth(method = "lm", color = "red") + # Adiciona uma linha de tendência
+  theme_bw() # Utiliza um tema com fundo branco para maior clareza
+
+# Criar um data frame com os dados e os pontos de mudança
+df <- data.frame(
+  index = 1:length(data_stream),
+  value = data_stream,
+  change = ifelse(1:length(data_stream) %in% change_points, "Change Detected", "No Change")
+)
+
+# Plotar os dados e os pontos de mudança
+# O gráfico mostra os pontos calculados para cada janela.
+ggplot(df, aes(x = index, y = value)) +
+  geom_line() +
+  geom_point(data = subset(df, change == "Change Detected"), aes(x = index, y = value), color = "red", size = 2) +
+  labs(title = "Change Detected with ADWIN", x = "Índice", y = "Valor") +
+  theme_minimal()
+
+# Análise detalhada dos pontos de mudança
+print("Análise dos Pontos de Mudança:")
+for (point in change_points) {
+  cat("Ponto de mudança detectado em:", point, "\n")
+  if (point > 1 & point < length(data_stream)) {
+    before_change <- data_stream[(point-2):(point-1)]
+    after_change <- data_stream[(point+1):(point+2)]
+    cat("Valores antes da mudança:", before_change, "\n")
+    cat("Valores após a mudança:", after_change, "\n\n")
+  }
+}
+
+```
+
+### Análise Detalhada dos Pontos de Mudança with OP
+
+```{r}
+# Instale a biblioteca 'pracma' se ainda não estiver instalada
+# install.packages("pracma")
+
+# Carregar bibliotecas necessárias
+library(pracma)
+library(ggplot2)
+library(ggthemes)
+library(statcomp)
+
+# Função para calcular padrões ordinais usando statcomp
+ordinal_patterns_statcomp <- function(series, emb_dim) {
+  if (length(series) < emb_dim) {
+    stop("A série temporal é muito curta para a dimensão de embedding especificada.")
+  }
+  
+  # Utilizando a função from `statcomp` para calcular os padrões ordinais
+  patterns <- ordinal_pattern(series, emb_dim)
+  
+  return(patterns)
+}
+
+# Função ADWIN ajustada para padrões ordinais
+ADWIN <- function(delta = 0.002) {
+  width <- 0
+  total <- 0
+  variance <- 0
+  window <- numeric(0)
+  
+  update <- function(value) {
+    width <<- width + 1
+    window <<- c(window, value)
+    total <<- total + value
+    if (width > 1) {
+      variance <<- var(window, na.rm = TRUE) # Calcula a variância, removendo NAs
+    }
+    if (width > 1 && detect_change()) {
+      return(TRUE)
+    }
+    return(FALSE)
+  }
+  
+  detect_change <- function() {
+    mean_val <- mean(window, na.rm = TRUE) # Calcula a média, removendo NAs
+    for (n in 1:(width - 1)) {
+      mean0 <- mean(window[1:n], na.rm = TRUE)
+      mean1 <- mean(window[(n + 1):width], na.rm = TRUE)
+      if (is.na(mean0) || is.na(mean1)) next # Pula iteração se a média for NA
+      if (abs(mean0 - mean1) > sqrt((variance / n) + (variance / (width - n))) * qnorm(1 - delta)) {
+        window <<- window[(n + 1):width]
+        width <<- length(window)
+        total <<- sum(window, na.rm = TRUE)
+        variance <<- var(window, na.rm = TRUE)
+        return(TRUE)
+      }
+    }
+    return(FALSE)
+  }
+  
+  list(update = update)
+}
+
+# Função para ajustar parâmetros e realizar análise detalhada
+adjust_and_analyze <- function(data_stream, delta_values, emb_dim_values) {
+  results <- list()
+  
+  for (delta in delta_values) {
+    for (emb_dim in emb_dim_values) {
+      # Calcular padrões ordinais
+      patterns <- ordinal_patterns(data_stream, emb_dim = emb_dim)
+      
+      # Inicializa o detector ADWIN
+      adwin <- ADWIN(delta = delta)
+      
+      # Vetor para armazenar os pontos de detecção de mudança
+      change_points <- numeric(0)
+      
+      # Processa o fluxo de dados usando padrões ordinais
+      for (i in 1:length(patterns)) {
+        if (adwin$update(patterns[i])) {
+          change_points <- c(change_points, i + emb_dim - 1) # Ajuste do índice devido ao embedding dimension
+        }
+      }
+      
+      # Armazena resultados
+      results[[paste("delta=", delta, "emb_dim=", emb_dim, sep = "")]] <- list(
+        delta = delta,
+        emb_dim = emb_dim,
+        change_points = change_points,
+        patterns = patterns
+      )
+    }
+  }
+  return(results)
+}
+
+# Visualização
+set.seed(123) # Define a semente para reprodutibilidade
+data_stream <- c(rnorm(100, mean = 20), rnorm(100, mean = 25)) # Gera dados de exemplo com duas médias diferentes
+
+# Ajustar os parâmetros delta e emb_dim
+delta_values <- c(0.001, 0.002, 0.005)
+emb_dim_values <- c(3, 4, 5)
+results <- adjust_and_analyze(data_stream, delta_values, emb_dim_values)
+
+# Selecionar o melhor resultado para visualização
+best_result <- results[[1]] # Aqui, selecionamos o primeiro resultado; você pode adicionar lógica para selecionar o melhor
+change_points <- best_result$change_points
+
+# Plotar os dados e os pontos de mudança
+df <- data.frame(
+  index = 1:length(data_stream),
+  value = data_stream,
+  change = ifelse(1:length(data_stream) %in% change_points, "Change Detected", "No Change")
+)
+
+ggplot(df, aes(x = index, y = value)) +
+  geom_line() +
+  geom_point(data = subset(df, change == "Change Detected"), aes(x = index, y = value), color = "blue", size = 2) +
+  labs(title = "Change Detected with ADWIN and OP", x = "Índice", y = "Valor") +
+  theme_minimal() +
+  theme_tufte()
+
+# Análise detalhada dos pontos de mudança
+print("Análise dos Pontos de Mudança:")
+for (point in change_points) {
+  cat("Ponto de mudança detectado em:", point, "\n")
+  if (point > 1 & point < length(best_result$patterns)) {
+    cat("Padrões Ordinais antes da mudança:", best_result$patterns[(point-2):(point-1)], "\n")
+    cat("Padrões Ordinais após a mudança:", best_result$patterns[(point+1):(point+2)], "\n\n")
+  }
+}
+
+```
+## Visualização das Mudanças
+
+### Sem Padrões Ordinais (OP)
+
+**Ponto de mudança detectado em: 101:**
+
+- Há uma transição clara nos valores dos dados, de aproximadamente 19 para 25.
+- Esta mudança corresponde à transição na média dos dados que foi introduzida no fluxo de dados gerado (`rnorm(100, mean = 20)`, `rnorm(100, mean = 25)`).
+
+**Ponto de mudança detectado em: 164 e 180:**
+
+- Os valores antes e depois da mudança são relativamente próximos (23-26), indicando que o ADWIN é sensível a pequenas flutuações e mudanças na média dos dados.
+- Essas mudanças podem ser devidas a variações naturais nos dados ou a pequenas mudanças no padrão dos dados.
+
+### Com Padrões Ordinais (OP)
+
+**Ponto de mudança detectado em: 40:**
+
+- Padrões Ordinais antes da mudança são 5, 5, e após a mudança são 7, 19.
+- Indica que há uma mudança na estrutura ordinal dos dados, sugerindo uma mudança mais sutil que pode não ser capturada apenas pela média dos dados.
+
+**Ponto de mudança detectado em: 52:**
+
+- Padrões Ordinais antes da mudança são 15, 5, e após a mudança são 7, 19.
+- Similar ao ponto de mudança em 40, há uma mudança nos padrões ordinais que indica uma mudança na estrutura dos dados.
+
+### Comparação
+
+**Sensibilidade:**
+
+- **Sem OP:** O ADWIN detecta principalmente mudanças significativas na média dos dados.
+- **Com OP:** O ADWIN é capaz de detectar mudanças mais sutis na estrutura dos dados, capturadas pelos padrões ordinais.
+
+**Distribuição dos Pontos de Mudança:**
+
+- **Sem OP:** Mudanças detectadas após a transição principal dos dados (em torno do ponto 100).
+- **Com OP:** Mudanças detectadas antes da transição principal, sugerindo maior sensibilidade a mudanças estruturais nos dados.
+
+**Robustez à Escala:**
+
+- **Sem OP:** A detecção de mudanças está mais focada em grandes variações na média dos dados.
+- **Com OP:** A detecção de mudanças leva em conta a ordem relativa dos valores, tornando-se menos suscetível a grandes variações de amplitude.
+
+A adição de padrões ordinais melhora a sensibilidade do ADWIN para detectar mudanças estruturais nos dados, que podem não ser evidentes pela análise dos valores médios.
+
+Os padrões ordinais ajudam a identificar mudanças sutis e estruturais na série temporal.
+
+```{r}
+
+# Plotar os dados sem OP
+ggplot(df1, aes(x = index, y = value)) +
+  geom_line() +
+  geom_point(data = subset(df1, change == "Change Detected"), aes(x = index, y = value), color = "red", size = 2) +
+  labs(title = "Change Detected with ADWIN (No OP)", x = "Índice", y = "Valor") +
+  theme_minimal()
+
+# Plotar os dados com OP
+ggplot(df, aes(x = index, y = value)) +
+  geom_line() +
+  geom_point(data = subset(df, change == "Change Detected"), aes(x = index, y = value), color = "blue", size = 2) +
+  labs(title = "Change Detected with ADWIN and OP", x = "Índice", y = "Valor") +
+  theme_minimal()
+```
+## Plano HxC (Entropia de Shannon x Complexidade de Jensen-Shannon) with OP
+
+Calculando e visualizar a evolução dos padrões ao longo do tempo no plano HxC utilizando janelas deslizantes e padrões ordinais, vamos calcular a entropia de Shannon e a complexidade de Jensen-Shannon em cada janela deslizante da série temporal.
+
+```{r}
+
+# Carregar bibliotecas necessárias
+library(pracma)
+library(ggplot2)
+library(ggthemes)
+library(statcomp)
+
+# Função para calcular padrões ordinais usando statcomp
+ordinal_patterns_statcomp <- function(series, emb_dim) {
+  if (length(series) < emb_dim) {
+    stop("A série temporal é muito curta para a dimensão de embedding especificada.")
+  }
+  
+  # Utilizando a função from `statcomp` para calcular os padrões ordinais
+  patterns <- ordinal_pattern(series, emb_dim)
+  
+  return(patterns)
+}
+
+# Função para calcular a entropia de Shannon
+shannon_entropy <- function(probabilities) {
+  -sum(probabilities * log2(probabilities), na.rm = TRUE)
+}
+
+# Função para calcular a complexidade de Jensen-Shannon
+js_complexity <- function(probabilities) {
+  q <- rep(1/length(probabilities), length(probabilities))
+  m <- (probabilities + q) / 2
+  (shannon_entropy(m) - 0.5 * (shannon_entropy(probabilities) + shannon_entropy(q))) / log2(length(probabilities))
+}
+
+# Função para calcular probabilidades dos padrões ordinais
+calculate_probabilities <- function(patterns) {
+  table_patterns <- table(patterns)
+  probabilities <- as.numeric(table_patterns) / sum(table_patterns)
+  return(probabilities)
+}
+
+# Função para calcular H e C em janelas deslizantes com padrões ordinais
+calculate_hxc_with_op <- function(series, window_size, emb_dim) {
+  n <- length(series)
+  h_values <- c()
+  c_values <- c()
+  
+  for (i in 1:(n - window_size + 1)) {
+    window <- series[i:(i + window_size - 1)]
+    patterns <- ordinal_patterns(window, emb_dim)
+    probabilities <- calculate_probabilities(patterns)
+    h <- shannon_entropy(probabilities)
+    c <- js_complexity(probabilities)
+    h_values <- c(h_values, h)
+    c_values <- c(c_values, c)
+  }
+  
+  data.frame(H = h_values, C = c_values)
+}
+
+# Função ADWIN para detectar mudanças de conceito em fluxos de dados
+ADWIN <- function(delta = 0.002) {
+  # Inicializa as variáveis
+  width <- 0 # Tamanho da janela
+  total <- 0 # Soma dos valores na janela
+  variance <- 0 # Variância dos valores na janela
+  window <- numeric(0) # Vetor que armazena os valores na janela
+  
+  # Função para atualizar o ADWIN com um novo valor
+  update <- function(value) {
+    width <<- width + 1 # Incrementa o tamanho da janela
+    window <<- c(window, value) # Adiciona o novo valor à janela
+    total <<- total + value # Atualiza a soma total
+    if (width > 1) {
+      variance <<- var(window) # Calcula a variância se a janela tiver mais de um valor
+    }
+    # Checa por concept drift
+    if (width > 1 && detect_change()) {
+      return(TRUE) # Retorna TRUE se uma mudança for detectada
+    }
+    return(FALSE) # Retorna FALSE se nenhuma mudança for detectada
+  }
+  
+  # Função para detectar mudança
+  detect_change <- function() {
+    mean_val <- mean(window) # Calcula a média dos valores na janela
+    for (n in 1:(width - 1)) {
+      # Divide a janela em duas sub-janelas e calcula as médias de cada sub-janela
+      mean0 <- mean(window[1:n])
+      mean1 <- mean(window[(n + 1):width])
+      # Compara as médias das sub-janelas usando um teste estatístico
+      if (abs(mean0 - mean1) > sqrt((variance / n) + (variance / (width - n))) * qnorm(1 - delta)) {
+        # Se uma mudança for detectada, ajusta a janela para descartar os dados antigos
+        window <<- window[(n + 1):width]
+        width <<- length(window)
+        total <<- sum(window)
+        variance <<- var(window)
+        return(TRUE) # Retorna TRUE indicando que uma mudança foi detectada
+      }
+    }
+    return(FALSE) # Retorna FALSE se nenhuma mudança for detectada
+  }
+  
+  # Retorna as funções de atualização e detecção
+  list(update = update)
+}
+
+# Função para ajustar parâmetros e realizar análise detalhada
+adjust_and_analyze <- function(data_stream, delta_values, emb_dim_values) {
+  results <- list()
+  
+  for (delta in delta_values) {
+    for (emb_dim in emb_dim_values) {
+      # Calcular padrões ordinais
+      patterns <- ordinal_patterns(data_stream, emb_dim = emb_dim)
+      
+      # Inicializa o detector ADWIN
+      adwin <- ADWIN(delta = delta)
+      
+      # Vetor para armazenar os pontos de detecção de mudança
+      change_points <- numeric(0)
+      
+      # Processa o fluxo de dados usando padrões ordinais
+      for (i in 1:length(patterns)) {
+        if (adwin$update(patterns[i])) {
+          change_points <- c(change_points, i + emb_dim - 1) # Ajuste do índice devido ao embedding dimension
+        }
+      }
+      
+      # Armazena resultados
+      results[[paste("delta=", delta, "emb_dim=", emb_dim, sep = "")]] <- list(
+        delta = delta,
+        emb_dim = emb_dim,
+        change_points = change_points,
+        patterns = patterns
+      )
+    }
+  }
+  return(results)
+}
+
+# Exemplo de uso com visualização
+set.seed(123) # Define a semente para reprodutibilidade
+data_stream <- c(rnorm(100, mean = 20), rnorm(100, mean = 25)) # Gera dados de exemplo com duas médias diferentes
+
+# Ajustar os parâmetros delta e emb_dim
+delta_values <- c(0.001, 0.002, 0.005)
+emb_dim_values <- c(3, 4, 5)
+results <- adjust_and_analyze(data_stream, delta_values, emb_dim_values)
+
+# Selecionar o melhor resultado para visualização
+best_result <- results[[1]] # Aqui, selecionamos o primeiro resultado; você pode adicionar lógica para selecionar o melhor
+change_points <- best_result$change_points
+
+# Calcular H e C em janelas deslizantes com padrões ordinais
+window_size <- 50
+emb_dim <- 3
+hxc_data <- calculate_hxc_with_op(data_stream, window_size, emb_dim)
+
+# Plotar o plano HxC
+ggplot(hxc_data, aes(x = H, y = C)) +
+  geom_point(color = "blue") +
+  labs(title = "Plano HxC with ADWIN and Ordinal Patterns",
+       x = "Entropia de Shannon (H)", y = "Complexidade de Jensen-Shannon (C)") +
+  theme_minimal() +
+  geom_smooth(method = "lm", color = "red") + # Adiciona uma linha de tendência
+  theme_bw() # Utiliza um tema com fundo branco para maior clareza
+
+# Criar um data frame com os dados e os pontos de mudança
+df <- data.frame(
+  index = 1:length(data_stream),
+  value = data_stream,
+  change = ifelse(1:length(data_stream) %in% change_points, "Change Detected", "No Change")
+)
+
+# Plotar os dados e os pontos de mudança
+ggplot(df, aes(x = index, y = value)) +
+  geom_line() +
+  geom_point(data = subset(df, change == "Change Detected"), aes(x = index, y = value), color = "blue", size = 2) +
+  labs(title = "Change Detected with ADWIN and Ordinal Patterns", x = "Índice", y = "Valor") +
+  theme_minimal() +
+  theme_tufte()
+
+# Análise detalhada dos pontos de mudança
+print("Análise dos Pontos de Mudança:")
+for (point in change_points) {
+  cat("Ponto de mudança detectado em:", point, "\n")
+  if (point > 1 & point < length(best_result$patterns)) {
+    cat("Padrões Ordinais antes da mudança:", best_result$patterns[(point-2):(point-1)], "\n")
+    cat("Padrões Ordinais após a mudança:", best_result$patterns[(point+1):(point+2)], "\n\n")
+  }
+}
+
+```
+
+## Algoritmo Combinado para Detecção de Mudanças
+
+Adaptação do ADWIN para detectar mudanças tanto na média dos dados quanto nos padrões ordinais. Esse algoritmo permitirá *detectar mudanças significativas na média dos dados e mudanças sutis na estrutura dos dados*.
+
+Passos do Algoritmo:
+
+1. Calcular padrões ordinais da série temporal.
+2. Aplicar ADWIN aos dados brutos para detectar mudanças na média.
+3. Aplicar ADWIN aos padrões ordinais para detectar mudanças na estrutura dos dados.
+4. Combinar os pontos de mudança detectados por ambos os métodos.
+
+```{r}
+
+# Carregar bibliotecas necessárias
+library(pracma)
+library(ggplot2)
+library(ggthemes)
+library(statcomp)
+
+# Função para calcular padrões ordinais
+# Esta função calcula padrões ordinais para uma série temporal dada uma dimensão de embedding.
+# Patterns: Vetor com os padrões ordinais calculados
+# series: A série temporal de entrada
+# emb_dim: Dimensão de embedding (por exemplo, 3)
+
+# ordinal_patterns <- function(series, emb_dim) {
+#   n <- length(series)
+#   if (n < emb_dim) {
+#     stop("A série temporal é muito curta para a dimensão de embedding especificada.")
+#   }
+#   
+#   patterns <- numeric(n - emb_dim + 1)
+#   for (i in 1:(n - emb_dim + 1)) {
+#     subseq <- series[i:(i + emb_dim - 1)]
+#     ranks <- rank(subseq, ties.method = "first")
+#     pattern <- sum((ranks - 1) * (emb_dim ^ (0:(emb_dim - 1))))
+#     patterns[i] <- pattern
+#   }
+#   return(patterns)
+# }
+
+# Função para calcular padrões ordinais usando statcomp
+ordinal_patterns_statcomp <- function(series, emb_dim) {
+  if (length(series) < emb_dim) {
+    stop("A série temporal é muito curta para a dimensão de embedding especificada.")
+  }
+  
+  # Utilizando a função from `statcomp` para calcular os padrões ordinais
+  patterns <- ordinal_pattern(series, emb_dim)
+  
+  return(patterns)
+}
+
+# Função ADWIN para detectar mudanças de conceito em fluxos de dados
+# Esta função implementa o ADWIN que ajusta dinamicamente o tamanho de uma janela deslizante de dados e verifica se houve uma mudança significativa na distribuição dos dados.
+# delta: Parâmetro de sensibilidade para detectar mudanças
+ADWIN <- function(delta = 0.002) {
+  width <- 0 # Tamanho da janela
+  total <- 0 # Soma dos valores na janela
+  variance <- 0 # Variância dos valores na janela
+  window <- numeric(0) # Vetor que armazena os valores na janela
+  
+  # Função para atualizar o ADWIN com um novo valor
+  # value: Novo valor a ser adicionado à janela
+  update <- function(value) {
+    width <<- width + 1
+    window <<- c(window, value)
+    total <<- total + value
+    if (width > 1) {
+      variance <<- var(window, na.rm = TRUE)
+    }
+    # Checa por concept drift
+    if (width > 1 && detect_change()) {
+      return(TRUE)
+    }
+    return(FALSE)
+  }
+  
+  # Função para detectar mudança
+  detect_change <- function() {
+    mean_val <- mean(window, na.rm = TRUE)
+    for (n in 1:(width - 1)) {
+      mean0 <- mean(window[1:n], na.rm = TRUE)
+      mean1 <- mean(window[(n + 1):width], na.rm = TRUE)
+      if (is.na(mean0) || is.na(mean1)) next
+      if (abs(mean0 - mean1) > sqrt((variance / n) + (variance / (width - n))) * qnorm(1 - delta)) {
+        window <<- window[(n + 1):width]
+        width <<- length(window)
+        total <<- sum(window, na.rm = TRUE)
+        variance <<- var(window, na.rm = TRUE)
+        return(TRUE)
+      }
+    }
+    return(FALSE)
+  }
+  
+  list(update = update)
+}
+
+# Exemplo 
+set.seed(123) # Define a semente para reprodutibilidade
+data_stream <- c(rnorm(100, mean = 20), rnorm(100, mean = 25)) # Gera dados de exemplo com duas médias diferentes
+
+# Inicializa detectores ADWIN
+adwin_data <- ADWIN(delta = 0.002)
+adwin_patterns <- ADWIN(delta = 0.002)
+
+# Calcular padrões ordinais
+patterns <- ordinal_patterns(data_stream, emb_dim = 3)
+
+# Vetores para armazenar os pontos de detecção de mudança
+change_points_data <- numeric(0)
+change_points_patterns <- numeric(0)
+
+# Processa o fluxo de dados
+# Para cada ponto na série temporal, atualiza o ADWIN para dados brutos e para padrões ordinais
+for (i in 1:length(data_stream)) {
+  if (adwin_data$update(data_stream[i])) {
+    change_points_data <- c(change_points_data, i)
+  }
+  if (i <= length(patterns) && adwin_patterns$update(patterns[i])) {
+    change_points_patterns <- c(change_points_patterns, i + 2)
+  }
+}
+
+# Combinar pontos de mudança
+# Junta os pontos de mudança detectados por ambos os métodos
+change_points_combined <- sort(unique(c(change_points_data, change_points_patterns)))
+
+# Plotar os dados e os pontos de mudança
+# Cria um data frame com os pontos de mudança detectados pelos dois métodos e os combina
+df <- data.frame(
+  index = 1:length(data_stream),
+  value = data_stream,
+  change_data = ifelse(1:length(data_stream) %in% change_points_data, "Change Detected (Data)", "No Change"),
+  change_patterns = ifelse(1:length(data_stream) %in% change_points_patterns, "Change Detected (Patterns)", "No Change"),
+  change_combined = ifelse(1:length(data_stream) %in% change_points_combined, "Change Detected (Combined)", "No Change")
+)
+
+# Plota a série temporal com os pontos de mudança detectados, destacando os diferentes métodos de detecção
+ggplot(df, aes(x = index, y = value)) +
+  geom_line() +
+  geom_point(data = subset(df, change_combined == "Change Detected (Combined)"), aes(x = index, y = value), color = "blue", size = 2) +
+  geom_point(data = subset(df, change_data == "Change Detected (Data)"), aes(x = index, y = value), color = "red", size = 2) +
+  geom_point(data = subset(df, change_patterns == "Change Detected (Patterns)"), aes(x = index, y = value), color = "blue", size = 2) +
+  labs(title = "Change Detected com ADWIN and OP (Combinado)", x = "Índice", y = "Valor") +
+  theme_minimal()
+
+# Análise detalhada dos pontos de mudança
+print("Análise dos Pontos de Mudança (Sem OP):")
+for (point in change_points_data) {
+  cat("Ponto de mudança detectado em:", point, "\n")
+  if (point > 1 & point < length(data_stream)) {
+    before_change <- data_stream[(point-2):(point-1)]
+    after_change <- data_stream[(point+1):(point+2)]
+    cat("Valores antes da mudança:", before_change, "\n")
+    cat("Valores após a mudança:", after_change, "\n\n")
+  }
+}
+
+print("Análise dos Pontos de Mudança (Com OP):")
+for (point in change_points_patterns) {
+  cat("Ponto de mudança detectado em:", point, "\n")
+  if (point > 1 & point < length(patterns)) {
+    cat("Padrões Ordinais antes da mudança:", patterns[(point-2):(point-1)], "\n")
+    cat("Padrões Ordinais após a mudança:", patterns[(point+1):(point+2)], "\n\n")
+  }
+}
+
+```
+
+## Plano HxC (Entropia de Shannon x Complexidade de Jensen-Shannon) ADWIN and OP (Combinado)
+
+Para visualizar a evolução dos padrões ao longo do tempo e obter vários pontos no plano HxC, é preciso calcular essas métricas em janelas deslizantes ao longo da série.
+
+O plano HxC plota a entropia de Shannon (H) no eixo x e a complexidade de Jensen-Shannon (C) no eixo y para janelas deslizantes da série temporal. O gráfico mostra os pontos calculados para cada janela.
+
+Os pontos estão distribuídos ao longo de uma linha decrescente, indicando uma relação inversa entre a entropia e a complexidade. *Conforme a entropia aumenta, a complexidade tende a diminuir.*
+
+A entropia de Shannon mede a incerteza ou imprevisibilidade na distribuição dos padrões ordinais. *Valores mais altos de H indicam maior desordem na série temporal.*
+No gráfico, H varia entre aproximadamente 2.40 e 2.55.
+
+A complexidade de Jensen-Shannon mede a complexidade estrutural da distribuição de probabilidades.
+No gráfico, C varia entre aproximadamente 0.000 e 0.020.
+
+*A relação inversa entre entropia e complexidade sugere que, à medida que a incerteza (H) aumenta, a estrutura da série temporal se torna menos complexa (C). Isso é típico em séries temporais onde uma maior entropia pode resultar em uma distribuição mais uniforme dos padrões, reduzindo a complexidade.*
+
+*As mudanças no plano HxC podem indicar mudanças na estrutura da série temporal que não são evidentes apenas pela análise dos valores médios. Mudanças significativas na distribuição dos pontos podem corresponder a mudanças detectadas pelo ADWIN.*
+
+O uso do plano HxC proporciona uma maneira robusta de visualizar mudanças na estrutura de séries temporais. *A combinação da entropia de Shannon e da complexidade de Jensen-Shannon pode ajudar a identificar mudanças sutis que não são capturadas apenas pela análise dos valores médios. Este método pode ser útil em diversas aplicações, incluindo a análise de séries temporais financeiras, médicas, e outras onde a detecção de mudanças estruturais é crucial.*
+
+```{r}
+
+# Carregar bibliotecas necessárias
+library(pracma)
+library(ggplot2)
+library(ggthemes)
+library(statcomp)
+
+# Função para calcular padrões ordinais usando statcomp
+ordinal_patterns_statcomp <- function(series, emb_dim) {
+  if (length(series) < emb_dim) {
+    stop("A série temporal é muito curta para a dimensão de embedding especificada.")
+  }
+  
+  # Utilizando a função from `statcomp` para calcular os padrões ordinais
+  patterns <- ordinal_pattern(series, emb_dim)
+  
+  return(patterns)
+}
+
+
+# Função para calcular a entropia de Shannon
+shannon_entropy <- function(probabilities) {
+  -sum(probabilities * log2(probabilities), na.rm = TRUE)
+}
+
+# Função para calcular a complexidade de Jensen-Shannon
+js_complexity <- function(probabilities) {
+  p <- probabilities
+  q <- rep(1/length(probabilities), length(probabilities))
+  m <- (p + q) / 2
+  return((shannon_entropy(m) - 0.5 * (shannon_entropy(p) + shannon_entropy(q))) / log2(length(probabilities)))
+}
+
+# Função para calcular probabilidades dos padrões ordinais
+calculate_probabilities <- function(patterns) {
+  table_patterns <- table(patterns)
+  probabilities <- as.numeric(table_patterns) / sum(table_patterns)
+  return(probabilities)
+}
+
+# Função ADWIN para detectar mudanças de conceito em fluxos de dados
+ADWIN <- function(delta = 0.002) {
+  width <- 0 # Tamanho da janela
+  total <- 0 # Soma dos valores na janela
+  variance <- 0 # Variância dos valores na janela
+  window <- numeric(0) # Vetor que armazena os valores na janela
+  
+  update <- function(value) {
+    width <<- width + 1
+    window <<- c(window, value)
+    total <<- total + value
+    if (width > 1) {
+      variance <<- var(window, na.rm = TRUE)
+    }
+    if (width > 1 && detect_change()) {
+      return(TRUE)
+    }
+    return(FALSE)
+  }
+  
+  detect_change <- function() {
+    mean_val <- mean(window, na.rm = TRUE)
+    for (n in 1:(width - 1)) {
+      mean0 <- mean(window[1:n], na.rm = TRUE)
+      mean1 <- mean(window[(n + 1):width], na.rm = TRUE)
+      if (is.na(mean0) || is.na(mean1)) next
+      if (abs(mean0 - mean1) > sqrt((variance / n) + (variance / (width - n))) * qnorm(1 - delta)) {
+        window <<- window[(n + 1):width]
+        width <<- length(window)
+        total <<- sum(window, na.rm = TRUE)
+        variance <<- var(window, na.rm = TRUE)
+        return(TRUE)
+      }
+    }
+    return(FALSE)
+  }
+  
+  list(update = update)
+}
+
+# Exemplo 
+set.seed(123) # Define a semente para reprodutibilidade
+data_stream <- c(rnorm(100, mean = 20), rnorm(100, mean = 25)) # Gera dados de exemplo com duas médias diferentes
+
+# Inicializa detectores ADWIN
+adwin_data <- ADWIN(delta = 0.002)
+adwin_patterns <- ADWIN(delta = 0.002)
+
+# Calcular padrões ordinais
+patterns <- ordinal_patterns(data_stream, emb_dim = 3)
+
+# Vetores para armazenar os pontos de detecção de mudança
+change_points_data <- numeric(0)
+change_points_patterns <- numeric(0)
+
+# Processa o fluxo de dados
+for (i in 1:length(data_stream)) {
+  if (adwin_data$update(data_stream[i])) {
+    change_points_data <- c(change_points_data, i)
+  }
+  if (i <= length(patterns) && adwin_patterns$update(patterns[i])) {
+    change_points_patterns <- c(change_points_patterns, i + 2)
+  }
+}
+
+# Combinar pontos de mudança
+change_points_combined <- sort(unique(c(change_points_data, change_points_patterns)))
+
+# Calcular H e C em janelas deslizantes
+window_size <- 50
+H_values <- numeric()
+C_values <- numeric()
+indices <- seq(1, length(patterns) - window_size + 1, by = 1)
+
+for (i in indices) {
+  window_patterns <- patterns[i:(i + window_size - 1)]
+  probabilities <- calculate_probabilities(window_patterns)
+  H_values <- c(H_values, shannon_entropy(probabilities))
+  C_values <- c(C_values, js_complexity(probabilities))
+}
+
+# Criar um data frame para os valores H e C
+df_HxC <- data.frame(H = H_values, C = C_values)
+
+# Plotar os resultados no plano HxC
+ggplot(df_HxC, aes(x = H, y = C)) +
+  geom_point(color = "blue", size = 3) +
+  labs(title = "Plano HxC Change Detected with ADWIN and Ordinal Patterns (Combined)",
+       x = "Entropia de Shannon (H)",
+       y = "Complexidade de Jensen-Shannon (C)") +
+  theme_minimal() +
+  geom_smooth(method = "lm", color = "red") + # Adiciona uma linha de tendência
+  theme_bw() # Utiliza um tema com fundo branco para maior clareza
+
+# Plotar os dados e os pontos de mudança
+df <- data.frame(
+  index = 1:length(data_stream),
+  value = data_stream,
+  change_data = ifelse(1:length(data_stream) %in% change_points_data, "Change Detected (Data)", "No Change"),
+  change_patterns = ifelse(1:length(data_stream) %in% change_points_patterns, "Change Detected (Patterns)", "No Change"),
+  change_combined = ifelse(1:length(data_stream) %in% change_points_combined, "Change Detected (Combined)", "No Change")
+)
+
+ggplot(df, aes(x = index, y = value)) +
+  geom_line() +
+  geom_point(data = subset(df, change_combined == "Change Detected (Combined)"), aes(x = index, y = value), color = "blue", size = 2) +
+  geom_point(data = subset(df, change_data == "Change Detected (Data)"), aes(x = index, y = value), color = "red", size = 2) +
+  geom_point(data = subset(df, change_patterns == "Change Detected (Patterns)"), aes(x = index, y = value), color = "blue", size = 2) +
+  labs(title = "Change Detected with ADWIN and Ordinal Patterns (Combined)", x = "Índice", y = "Valor") +
+  theme_minimal()
+
+# Análise detalhada dos pontos de mudança
+print("Análise dos Pontos de Mudança (Sem OP):")
+for (point in change_points_data) {
+  cat("Ponto de mudança detectado em:", point, "\n")
+  if (point > 1 & point < length(data_stream)) {
+    before_change <- data_stream[(point-2):(point-1)]
+    after_change <- data_stream[(point+1):(point+2)]
+    cat("Valores antes da mudança:", before_change, "\n")
+    cat("Valores após a mudança:", after_change, "\n\n")
+  }
+}
+
+print("Análise dos Pontos de Mudança (Com OP):")
+for (point in change_points_patterns) {
+  cat("Ponto de mudança detectado em:", point, "\n")
+  if (point > 1 & point < length(patterns)) {
+    cat("Padrões Ordinais antes da mudança:", patterns[(point-2):(point-1)], "\n")
+    cat("Padrões Ordinais após a mudança:", patterns[(point+1):(point+2)], "\n\n")
+  }
+}
+
+```
+
+### Análise dos Três Cenários no Plano HxC
+
+#### Cenário 1: Plano HxC with ADWIN
+
+![Plano HxC com ADWIN](sandbox:/mnt/data/file-6SYbMzoCUeazf4MdhIqinSnD)
+
+Neste cenário, a entropia de Shannon (H) e a complexidade de Jensen-Shannon (C) foram calculadas para janelas deslizantes dos dados brutos e o ADWIN foi utilizado para detectar mudanças.
+
+**Observações:**
+
+- A relação entre H e C mostra uma tendência crescente, o que indica que, à medida que a entropia aumenta, a complexidade também tende a aumentar.
+
+- A linha de tendência (em vermelho) confirma a correlação positiva entre H e C, mas há uma dispersão significativa em torno da linha, sugerindo variação nos dados.
+
+**Interpretação:**
+
+- A tendência crescente sugere que, nos dados brutos, aumentos na entropia estão associados a aumentos na complexidade.
+
+- A dispersão pode indicar a presença de variações locais nos dados, possivelmente devido a mudanças nos padrões dos dados ao longo do tempo.
+
+#### Cenário 2: Plano HxC with ADWIN and Padrões Ordinais
+
+![Plano HxC with ADWIN and Padrões Ordinais](sandbox:/mnt/data/file-XWggTK3NBqVsshxl1PCW4LAV)
+
+Neste cenário, além do ADWIN, foram utilizados padrões ordinais para calcular H e C.
+
+**Observações:**
+
+- A relação entre H e C mostra uma tendência decrescente, sugerindo uma relação inversa entre a entropia e a complexidade.
+
+- A linha de tendência (em vermelho) confirma a correlação negativa entre H e C.
+
+**Interpretação:**
+
+- A tendência decrescente indica que, quando os padrões ordinais são utilizados, há uma redução na complexidade à medida que a entropia aumenta.
+
+- Isso pode ser um sinal de que, em termos de padrões ordinais, a complexidade dos padrões diminui com o aumento da entropia, possivelmente indicando que os padrões se tornam mais previsíveis.
+
+#### Cenário 3: Plano HxC Change Detected with ADWIN and Padrões Ordinais (Combinado)
+
+![Plano HxC Change Detected with ADWIN and Padrões Ordinais (Combinado)](sandbox:/mnt/data/file-k6NsCUnXYiMcQyz9iRH7W3Jv)
+
+Neste cenário, os pontos de mudança detectados pelo ADWIN e pelos padrões ordinais foram combinados para calcular H e C.
+
+**Observações:**
+
+- A relação entre H e C mantém a tendência decrescente vista no Cenário 2, mas com uma dispersão menor em torno da linha de tendência.
+
+- A linha de tendência (em vermelho) confirma a forte correlação negativa entre H e C.
+
+**Interpretação:**
+
+- A combinação dos métodos ADWIN e padrões ordinais proporciona uma visão mais clara e consistente da relação inversa entre a entropia e a complexidade.
+
+- A menor dispersão sugere que a combinação dos métodos melhora a robustez da detecção de mudanças, proporcionando uma detecção mais precisa e consistente das variações nos dados.
+
+### Conclusão Geral
+
+Os três cenários analisados no plano HxC apresentam diferentes comportamentos na relação entre a entropia de Shannon e a complexidade de Jensen-Shannon:
+
+1. **Cenário 1:** A relação entre H e C nos dados brutos mostra uma correlação positiva, mas com dispersão significativa, sugerindo variabilidade local nos dados.
+
+2. **Cenário 2:** A utilização de padrões ordinais revela uma correlação negativa entre H e C, indicando uma possível simplificação dos padrões à medida que a entropia aumenta.
+
+3. **Cenário 3:** A combinação de ADWIN e padrões ordinais resulta em uma detecção de mudanças mais precisa, confirmando a correlação negativa com menor dispersão, o que sugere maior consistência na detecção de variações nos dados.
+
+Esses cenários ilustram como diferentes abordagens podem revelar distintas características dos dados, fornecendo insights valiosos sobre a natureza das mudanças nos fluxos de dados.
+
+**A abordagem combinada de ADWIN com padrões ordinais é significativa na medida em que pode oferecer melhorias na sensibilidade a mudanças estruturais que não são facilmente detectáveis apenas por mudanças na média ou variância. Isso é particularmente útil em aplicações onde a dinâmica subjacente dos dados é complexa e envolve mudanças no comportamento além de simples mudanças de amplitude.**
+
+______________________________________________________________________________________________________________________________
+
+#### Start Serie Prof. Alejandro
+
+We will build tricky time series.
+They will be comprised to two parts:
+\begin{enumerate}
+\item The first half will consist of batches of observations from independent identically distributed random variables (white noise) with zero mean and unitary standard deviation.
+We will use the following random variables:
+  \begin{itemize}
+  \item Standard Gaussian law: $Y_1\sim\text{N}(0,1)$.
+  \item Scaled Uniform distribution $Y_2=\sqrt{12}(U-1/2)$, with $U\sim\text{U}(0,1)$.
+  \item Noncentral Exponential distribution: $Y_3=Y-1$, with $Y\sim\text{E}(1)$.
+  \end{itemize}
+\item The second half will consist of observations of $1/f^k$ noise, with $k>0$ (coloured noise). These observations are standardized (zero mean, unitary variance).
+\end{enumerate}
+
+### Detecção de Mudança with ADWIN (TrickyTimeSeries)
+
+```{r}
+
+# From https://stackoverflow.com/questions/8697567/how-to-simulate-pink-noise-in-r
+library(ggplot2)
+library(ggthemes)
+
+# A função TK95 envolve cálculos de Fourier
+# Função para gerar ruído colorido
+TK95 <- function(N, alpha = 1){ 
+    # Cria uma sequência de frequências de Fourier
+    f <- seq(from=0, to=pi, length.out=(N/2+1))[-c(1,(N/2+1))] # Frequências de Fourier
+    f_ <- 1 / f^alpha # Lei de potência
+    RW <- sqrt(0.5*f_) * rnorm(N/2-1) # Parte real
+    IW <- sqrt(0.5*f_) * rnorm(N/2-1) # Parte imaginária
+    fR <- complex(real = c(rnorm(1), RW, rnorm(1), RW[(N/2-1):1]), 
+                  imaginary = c(0, IW, 0, -IW[(N/2-1):1]), length.out=N)
+    reihe <- fft(fR, inverse=TRUE) # Retornar ao domínio do tempo com transformada inversa de Fourier
+    return(Re(reihe)) # Retorna apenas a parte real
+}
+
+# A função TrickyTimeSeries gera 300 pontos de ruído colorido, além dos pontos de ruído branco.
+# Função para criar a série temporal
+TrickyTimeSeries <- function(n, k){
+  # Gera três tipos de ruído branco
+  y1 <- rnorm(n) # Ruído branco gaussiano
+  y2 <- sqrt(12)*runif(n, min=-1/2, max=1/2) # Ruído branco uniforme escalado
+  y3 <- rexp(n)-1 # Ruído branco exponencial não central
+
+  # Gera ruído colorido 1/f^k
+  fk <- TK95(N=3*n, alpha=k)
+  fk <- (fk-mean(fk))/sd(fk) # Padroniza para ter média zero e desvio padrão unitário
+
+  output <- c(y1, y2, y3, fk) # Combina as séries geradas
+  return(output)
+}
+
+# A função ADWIN é chamada repetidamente para cada ponto da série temporal. A lógica de detecção de mudanças envolve calcular a média e a variância de sub-janelas.
+# Função ADWIN para detectar mudanças de conceito
+ADWIN <- function(delta = 0.002) {
+  # Inicializa as variáveis
+  width <- 0 # Tamanho da janela
+  total <- 0 # Soma dos valores na janela
+  variance <- 0 # Variância dos valores na janela
+  window <- numeric(0) # Vetor que armazena os valores na janela
+  
+  # Função para atualizar o ADWIN com um novo valor
+  update <- function(value) {
+    width <<- width + 1 # Incrementa o tamanho da janela
+    window <<- c(window, value) # Adiciona o novo valor à janela
+    total <<- total + value # Atualiza a soma total
+    if (width > 1) {
+      variance <<- var(window) # Calcula a variância se a janela tiver mais de um valor
+    }
+    # Checa por concept drift
+    if (width > 1 && detect_change()) {
+      return(TRUE) # Retorna TRUE se uma mudança for detectada
+    }
+    return(FALSE) # Retorna FALSE se nenhuma mudança for detectada
+  }
+  
+  # Função para detectar mudança
+  detect_change <- function() {
+    mean_val <- mean(window) # Calcula a média dos valores na janela
+    for (n in 1:(width - 1)) {
+      # Divide a janela em duas sub-janelas e calcula as médias de cada sub-janela
+      mean0 <- mean(window[1:n])
+      mean1 <- mean(window[(n + 1):width])
+      # Compara as médias das sub-janelas usando um teste estatístico
+      if (abs(mean0 - mean1) > sqrt((variance / n) + (variance / (width - n))) * qnorm(1 - delta)) {
+        # Se uma mudança for detectada, ajusta a janela para descartar os dados antigos
+        window <<- window[(n + 1):width]
+        width <<- length(window)
+        total <<- sum(window)
+        variance <<- var(window)
+        return(TRUE) # Retorna TRUE indicando que uma mudança foi detectada
+      }
+    }
+    return(FALSE) # Retorna FALSE se nenhuma mudança for detectada
+  }
+  
+  # Retorna as funções de atualização e detecção
+  list(update = update)
+}
+
+# Geração da série temporal e detecção de mudanças
+set.seed(1234567890, kind="Mersenne-Twister") # Define a semente para reprodutibilidade
+y <- TrickyTimeSeries(n=100, k=1) # Gera a série temporal com duas médias diferentes
+
+# Inicializa o detector ADWIN
+adwin <- ADWIN(delta = 0.002)
+
+# Vetor para armazenar os pontos de detecção de mudança
+change_points <- numeric(0)
+
+# Processa o fluxo de dados
+for (i in 1:length(y)) {
+  if (adwin$update(y[i])) {
+    change_points <- c(change_points, i) # Armazena o índice onde a mudança foi detectada
+  }
+}
+
+# Criação do data frame para plotagem
+Tricky <- data.frame(x = 1:length(y), y = y, change = ifelse(1:length(y) %in% change_points, "Change Detected", "No Change"))
+
+# Plotar a série temporal com pontos de mudança
+ggplot(Tricky, aes(x = x, y = y)) +
+  geom_line() +
+  geom_point(data = subset(Tricky, change == "Change Detected"), aes(x = x, y = y), color = "red", size = 2) +
+  labs(title = "Change Detected with ADWIN in Série TrickyTimeSeries", x = "Índice", y = "Valor") +
+  theme_minimal() +
+  theme_tufte()
+```
+
+### Change Detected with ADWIN (TrickyTimeSeries) Plano HxC
+
+Para visualizar a evolução dos padrões ao longo do tempo e obter vários pontos no plano HxC, é preciso calcular essas métricas em janelas deslizantes ao longo da série temporal. O plano HxC plota a entropia de Shannon (H) no eixo x e a complexidade de Jensen-Shannon (C) no eixo y para janelas deslizantes da série temporal. 
+O gráfico mostra os pontos calculados para cada janela.
+
+```{r}
+# Carregar bibliotecas necessárias
+library(ggplot2)
+library(ggthemes)
+
+# Função para calcular a entropia de Shannon
+shannon_entropy <- function(probabilities) {
+  -sum(probabilities * log2(probabilities), na.rm = TRUE)
+}
+
+# Função para calcular a complexidade de Jensen-Shannon
+js_complexity <- function(probabilities) {
+  q <- rep(1/length(probabilities), length(probabilities))
+  m <- (probabilities + q) / 2
+  (shannon_entropy(m) - 0.5 * (shannon_entropy(probabilities) + shannon_entropy(q))) / log2(length(probabilities))
+}
+
+# Função para calcular H e C em janelas deslizantes
+calculate_hxc <- function(series, window_size) {
+  n <- length(series)
+  h_values <- c()
+  c_values <- c()
+  
+  for (i in 1:(n - window_size + 1)) {
+    window <- series[i:(i + window_size - 1)]
+    probabilities <- hist(window, plot = FALSE)$density
+    h <- shannon_entropy(probabilities)
+    c <- js_complexity(probabilities)
+    h_values <- c(h_values, h)
+    c_values <- c(c_values, c)
+  }
+  
+  data.frame(H = h_values, C = c_values)
+}
+
+# Função ADWIN para detectar mudanças de conceito em fluxos de dados
+ADWIN <- function(delta = 0.002) {
+  # Inicializa as variáveis
+  width <- 0 # Tamanho da janela
+  total <- 0 # Soma dos valores na janela
+  variance <- 0 # Variância dos valores na janela
+  window <- numeric(0) # Vetor que armazena os valores na janela
+  
+  # Função para atualizar o ADWIN com um novo valor
+  update <- function(value) {
+    width <<- width + 1 # Incrementa o tamanho da janela
+    window <<- c(window, value) # Adiciona o novo valor à janela
+    total <<- total + value # Atualiza a soma total
+    if (width > 1) {
+      variance <<- var(window) # Calcula a variância se a janela tiver mais de um valor
+    }
+    # Checa por concept drift
+    if (width > 1 && detect_change()) {
+      return(TRUE) # Retorna TRUE se uma mudança for detectada
+    }
+    return(FALSE) # Retorna FALSE se nenhuma mudança for detectada
+  }
+  
+  # Função para detectar mudança
+  detect_change <- function() {
+    mean_val <- mean(window) # Calcula a média dos valores na janela
+    for (n in 1:(width - 1)) {
+      # Divide a janela em duas sub-janelas e calcula as médias de cada sub-janela
+      mean0 <- mean(window[1:n])
+      mean1 <- mean(window[(n + 1):width])
+      # Compara as médias das sub-janelas usando um teste estatístico
+      if (abs(mean0 - mean1) > sqrt((variance / n) + (variance / (width - n))) * qnorm(1 - delta)) {
+        # Se uma mudança for detectada, ajusta a janela para descartar os dados antigos
+        window <<- window[(n + 1):width]
+        width <<- length(window)
+        total <<- sum(window)
+        variance <<- var(window)
+        return(TRUE) # Retorna TRUE indicando que uma mudança foi detectada
+      }
+    }
+    return(FALSE) # Retorna FALSE se nenhuma mudança for detectada
+  }
+  
+  # Retorna as funções de atualização e detecção
+  list(update = update)
+}
+
+# Função para gerar ruído colorido
+TK95 <- function(N, alpha = 1) { 
+  f <- seq(from = 0, to = pi, length.out = (N/2 + 1))[-c(1, (N/2 + 1))]
+  f_ <- 1 / f^alpha
+  RW <- sqrt(0.5 * f_) * rnorm(N/2 - 1)
+  IW <- sqrt(0.5 * f_) * rnorm(N/2 - 1)
+  fR <- complex(real = c(rnorm(1), RW, rnorm(1), RW[(N/2 - 1):1]), 
+                imaginary = c(0, IW, 0, -IW[(N/2 - 1):1]), length.out = N)
+  reihe <- fft(fR, inverse = TRUE)
+  return(Re(reihe))
+}
+
+# Função para criar a série temporal
+TrickyTimeSeries <- function(n, k) {
+  y1 <- rnorm(n)
+  y2 <- sqrt(12) * runif(n, min = -1/2, max = 1/2)
+  y3 <- rexp(n) - 1
+  fk <- TK95(N = 3 * n, alpha = k)
+  fk <- (fk - mean(fk)) / sd(fk)
+  output <- c(y1, y2, y3, fk)
+  return(output)
+}
+
+# Geração da série temporal e detecção de mudanças
+set.seed(1234567890, kind = "Mersenne-Twister")
+y <- TrickyTimeSeries(n = 100, k = 1)
+
+# Inicializa o detector ADWIN
+adwin <- ADWIN(delta = 0.002)
+
+# Vetor para armazenar os pontos de detecção de mudança
+change_points <- numeric(0)
+
+# Processa o fluxo de dados
+for (i in 1:length(y)) {
+  if (adwin$update(y[i])) {
+    change_points <- c(change_points, i)
+  }
+}
+
+# Calcular H e C em janelas deslizantes
+window_size <- 50
+hxc_data1 <- calculate_hxc(y, window_size)
+
+# Plotar o plano HxC
+ggplot(hxc_data1, aes(x = H, y = C)) +
+  geom_point(color = "blue") +
+  labs(title = "Plano HxC with ADWIN (TrickyTimeSeries)",
+       x = "Entropia de Shannon (H)", y = "Complexidade de Jensen-Shannon (C)") +
+  theme_minimal() +
+  geom_smooth(method = "lm", color = "red") +
+  theme_bw()
+
+# Criação do data frame para plotagem
+Tricky1 <- data.frame(
+  x = 1:length(y), 
+  y = y, 
+  change = ifelse(1:length(y) %in% change_points, "Change Detected", "No Change")
+)
+
+# Plotar a série temporal com pontos de mudança
+ggplot(Tricky1, aes(x = x, y = y)) +
+  geom_line() +
+  geom_point(data = subset(Tricky1, change == "Change Detected"), aes(x = x, y = y), color = "red", size = 2) +
+  labs(title = "Change Detected with ADWIN (TrickyTimeSeries)", x = "Índice", y = "Valor") +
+  theme_minimal() +
+  theme_tufte()
+
+
+```
+## TrickyTimeSeries
+
+#### Função `TK95`:
+- Gera ruído colorido usando a transformada inversa de Fourier.
+- `N` define o número de pontos, `alpha` controla a correlação do ruído.
+- Frequências de Fourier são calculadas e a lei de potência é aplicada.
+- Componentes real e imaginária são geradas e combinadas.
+- A transformada inversa de Fourier é aplicada para retornar ao domínio do tempo.
+
+#### Função `TrickyTimeSeries`:
+- Gera três tipos de ruído branco (gaussiano, uniforme escalado, exponencial não central).
+- Gera ruído colorido 1/f^k e padroniza.
+- Combina os diferentes tipos de ruído em uma única série temporal.
+
+#### Função `ADWIN`:
+- Detecta mudanças de conceito em fluxos de dados.
+- Inicializa variáveis para armazenar a janela deslizante e suas estatísticas.
+- `update`: Adiciona novos valores à janela e verifica se há mudança.
+- `detect_change`: Compara médias de sub-janelas usando um teste estatístico.
+- Ajusta a janela quando uma mudança é detectada.
+
+#### Geração da Série Temporal e Detecção de Mudanças:
+- Gera a série temporal `TrickyTimeSeries`.
+- Inicializa o detector `ADWIN`.
+- Processa a série temporal e armazena os índices onde mudanças são detectadas.
+
+#### Visualização:
+- Cria um data frame com os dados e pontos de mudança.
+- Plota a série temporal com pontos vermelhos destacando as mudanças detectadas.
+
+Então temos um gráfico que mostra a série temporal com pontos destacados onde o `ADWIN` detectou mudanças. Isso permite visualizar como a janela é ajustada e como as mudanças na média dos dados são identificadas ao longo do tempo.
+
+________________________________________________________________________________________________________________________
+
+### Padrões Ordinais with ADWIN (TrickyTimeSeries)
+
+Usar padrões ordinais para ajudar na detecção de mudanças com o ADWIN pode trazer benefícios significativos, especialmente em séries temporais não estacionárias. Padrões ordinais capturam a ordem relativa dos valores na série temporal, permitindo a detecção de mudanças na estrutura da série, independentemente da escala absoluta dos valores. **Isso pode complementar a detecção de mudanças baseada em média e variância usada pelo ADWIN, proporcionando uma detecção mais robusta.**
+
+Implementar a detecção de mudanças usando padrões ordinais junto com o ADWIN.
+
+#### Passos:
+
+1. Calcular Padrões Ordinais:
+
+* Extrair padrões ordinais de subsequências da série temporal.
+
+* Contar a frequência de cada padrão ordinal.
+
+2. Usar ADWIN para Detecção de Mudanças:
+
+* Aplicar ADWIN na frequência dos padrões ordinais.
+
+```{r}
+# # Carregar bibliotecas necessárias
+# library(pracma)
+# library(ggplot2)
+# library(ggthemes)
+# 
+# # Função para calcular padrões ordinais usando pracma
+# ordinal_patterns <- function(series, emb_dim) {
+#   n <- length(series)
+#   if (n < emb_dim) {
+#     stop("A série temporal é muito curta para a dimensão de embedding especificada.")
+#   }
+#   
+#   patterns <- numeric(n - emb_dim + 1)
+#   for (i in 1:(n - emb_dim + 1)) {
+#     subseq <- series[i:(i + emb_dim - 1)]
+#     ranks <- rank(subseq, ties.method = "first")
+#     pattern <- sum((ranks - 1) * (emb_dim ^ (0:(emb_dim - 1))))
+#     patterns[i] <- pattern
+#   }
+#   return(patterns)
+# }
+
+# Carregar bibliotecas necessárias
+library(pracma)
+library(ggplot2)
+library(ggthemes)
+library(statcomp)
+
+# Função para calcular padrões ordinais usando statcomp
+ordinal_patterns_statcomp <- function(series, emb_dim) {
+  if (length(series) < emb_dim) {
+    stop("A série temporal é muito curta para a dimensão de embedding especificada.")
+  }
+  
+  # Utilizando a função from `statcomp` para calcular os padrões ordinais
+  patterns <- ordinal_pattern(series, emb_dim)
+  
+  return(patterns)
+}
+
+# Função ADWIN ajustada para padrões ordinais
+ADWIN <- function(delta = 0.002) {
+  width <- 0
+  total <- 0
+  variance <- 0
+  window <- numeric(0)
+  
+  update <- function(value) {
+    width <<- width + 1
+    window <<- c(window, value)
+    total <<- total + value
+    if (width > 1) {
+      variance <<- var(window, na.rm = TRUE) # Calcula a variância, removendo NAs
+    }
+    if (width > 1 && detect_change()) {
+      return(TRUE)
+    }
+    return(FALSE)
+  }
+  
+  detect_change <- function() {
+    mean_val <- mean(window, na.rm = TRUE) # Calcula a média, removendo NAs
+    for (n in 1:(width - 1)) {
+      mean0 <- mean(window[1:n], na.rm = TRUE)
+      mean1 <- mean(window[(n + 1):width], na.rm = TRUE)
+      if (is.na(mean0) || is.na(mean1)) next # Pula iteração se a média for NA
+      if (abs(mean0 - mean1) > sqrt((variance / n) + (variance / (width - n))) * qnorm(1 - delta)) {
+        window <<- window[(n + 1):width]
+        width <<- length(window)
+        total <<- sum(window, na.rm = TRUE)
+        variance <<- var(window, na.rm = TRUE)
+        return(TRUE)
+      }
+    }
+    return(FALSE)
+  }
+  
+  list(update = update)
+}
+
+# Função para criar a série temporal
+TrickyTimeSeries <- function(n, k){
+  y1 <- rnorm(n)
+  y2 <- sqrt(12)*runif(n, min=-1/2, max=1/2)
+  y3 <- rexp(n)-1
+  fk <- TK95(N=3*n, alpha=k)
+  fk <- (fk-mean(fk))/sd(fk)
+  output <- c(y1, y2, y3, fk)
+  return(output)
+}
+
+# Função para gerar ruído colorido
+TK95 <- function(N, alpha = 1){ 
+    f <- seq(from=0, to=pi, length.out=(N/2+1))[-c(1,(N/2+1))] # Frequências de Fourier
+    f_ <- 1 / f^alpha # Lei de potência
+    RW <- sqrt(0.5*f_) * rnorm(N/2-1) # Parte real
+    IW <- sqrt(0.5*f_) * rnorm(N/2-1) # Parte imaginária
+    fR <- complex(real = c(rnorm(1), RW, rnorm(1), RW[(N/2-1):1]), 
+                  imaginary = c(0, IW, 0, -IW[(N/2-1):1]), length.out=N)
+    reihe <- fft(fR, inverse=TRUE) # Retornar ao domínio do tempo com transformada inversa de Fourier
+    return(Re(reihe)) # Retorna apenas a parte real
+}
+
+# Geração da série temporal
+set.seed(1234567890, kind="Mersenne-Twister")
+y <- TrickyTimeSeries(n=100, k=1)
+
+# Funções para calcular H e C
+shannon_entropy <- function(probabilities) {
+  -sum(probabilities * log2(probabilities), na.rm = TRUE)
+}
+
+js_complexity <- function(probabilities) {
+  q <- rep(1/length(probabilities), length(probabilities))
+  m <- (probabilities + q) / 2
+  (shannon_entropy(m) - 0.5 * (shannon_entropy(probabilities) + shannon_entropy(q))) / log2(length(probabilities))
+}
+
+calculate_probabilities <- function(patterns) {
+  table_patterns <- table(patterns)
+  probabilities <- as.numeric(table_patterns) / sum(table_patterns)
+  return(probabilities)
+}
+
+calculate_hxc_with_op <- function(series, window_size, emb_dim) {
+  n <- length(series)
+  h_values <- c()
+  c_values <- c()
+  
+  for (i in 1:(n - window_size + 1)) {
+    window <- series[i:(i + window_size - 1)]
+    patterns <- ordinal_patterns(window, emb_dim)
+    probabilities <- calculate_probabilities(patterns)
+    h <- shannon_entropy(probabilities)
+    c <- js_complexity(probabilities)
+    h_values <- c(h_values, h)
+    c_values <- c(c_values, c)
+  }
+  
+  data.frame(H = h_values, C = c_values)
+}
+
+# Calcular padrões ordinais usando pracma
+patterns <- ordinal_patterns(y, emb_dim = 3)
+
+# Verifique se os padrões ordinais foram gerados corretamente
+if (all(is.na(patterns))) {
+  stop("Os padrões ordinais não foram gerados corretamente.")
+}
+
+# Visualização dos padrões ordinais
+plot(patterns, type = 'l', main = 'Padrões Ordinais da Série Temporal', xlab = 'Índice', ylab = 'Padrão Ordinal')
+
+# Inicializa o detector ADWIN
+adwin <- ADWIN(delta = 0.01)  # Ajuste delta para um valor maior para maior sensibilidade
+
+# Vetor para armazenar os pontos de detecção de mudança
+change_points <- numeric(0)
+
+# Processa o fluxo de dados usando padrões ordinais
+for (i in 1:length(patterns)) {
+  if (adwin$update(patterns[i])) {
+    change_points <- c(change_points, i + 2) # Ajuste do índice devido ao embedding dimension
+  }
+}
+
+# Verificar se há mudanças detectadas
+print(change_points)
+
+# Calcular H e C em janelas deslizantes com padrões ordinais
+window_size <- 50
+hxc_data <- calculate_hxc_with_op(y, window_size, 3)
+
+# Plotar o plano HxC
+ggplot(hxc_data, aes(x = H, y = C)) +
+  geom_point(color = "blue") +
+  labs(title = "Plano HxC with ADWIN and Ordinal Patterns (TrickyTimeSeries)",
+       x = "Entropia de Shannon (H)", y = "Complexidade de Jensen-Shannon (C)") +
+  theme_minimal() +
+  geom_smooth(method = "lm", color = "red") +
+  theme_bw()
+
+# Criação do data frame para plotagem
+Tricky <- data.frame(x = 1:length(y), y = y, change = ifelse(1:length(y) %in% change_points, "Change Detected", "No Change"))
+
+# Plotar a série temporal com pontos de mudança
+ggplot(Tricky, aes(x = x, y = y)) +
+  geom_line() +
+  geom_point(data = subset(Tricky, change == "Change Detected"), aes(x = x, y = y), color = "red", size = 2) +
+  labs(title = "Change Detected with ADWIN and Ordinal Patterns (TrickyTimeSeries)", x = "Índice", y = "Valor") +
+  theme_minimal() +
+  theme_tufte()
+
+# Análise detalhada dos pontos de mudança
+print("Análise dos Pontos de Mudança (Padrões Ordinais):")
+for (point in change_points) {
+  cat("Ponto de mudança detectado em:", point, "\n")
+  if (point > 1 & point < length(y)) {
+    before_change <- y[(point-2):(point-1)]
+    after_change <- y[(point+1):(point+2)]
+    cat("Valores antes da mudança:", before_change, "\n")
+    cat("Valores após a mudança:", after_change, "\n\n")
+  }
+}
+
+```
+**Primeira Imagem Change Detected with ADWIN (TrickyTimeSeries)**
+<!-- ![Detecção de Mudança com ADWIN (TrickyTimeSeries)](attachment: file-sANheuzqX7xVxjBntbpaIBQZ) -->
+```{r}
+# Plotar a série temporal com pontos de mudança
+ggplot(Tricky1, aes(x = x, y = y)) +
+  geom_line() +
+  geom_vline(xintercept = c(100, 200, 300), col="violet") +
+  geom_point(data = subset(Tricky1, change == "Change Detected"), aes(x = x, y = y), color = "red", size = 2) +
+  labs(title = "Change Detected with ADWIN (TrickyTimeSeries)", x = "Índice", y = "Valor") +
+  theme_minimal() +
+  theme_tufte()
+```
+
+Podemos ver na imagem a série temporal do TrickyTimeSeries, mas desta vez as mudanças foram detectadas apenas usando o algoritmo ADWIN. Os pontos vermelhos indicam os locais de detecção de mudança. Comparando com a segunda imagem, podemos observar que há algumas diferenças nos pontos de detecção, o que sugere que a combinação com Padrões Ordinais pode melhorar ou alterar a sensibilidade do ADWIN para detectar certas mudanças na série temporal.
+
+**Segunda Imagem Change Detected with ADWIN and Ordinal Patterns (TrickyTimeSeries)**
+<!-- ![Detecção de Mudança com ADWIN e Padrões Ordinais (TrickyTimeSeries)](attachment: file-BOsO2j2JCZOo32Gb06gAxeQA) -->
+
+```{r}
+# Plotar a série temporal com pontos de mudança
+ggplot(Tricky, aes(x = x, y = y)) +
+  geom_line() +
+  geom_vline(xintercept = c(100, 200, 300), col="violet") +
+  geom_point(data = subset(Tricky, change == "Change Detected"), aes(x = x, y = y), color = "red", size = 2) +
+  labs(title = "Change Detected with ADWIN and Ordinal Patterns (TrickyTimeSeries)", x = "Índice", y = "Valor") +
+  theme_minimal() +
+  theme_tufte()
+```
+
+Esta imagem mostra a série temporal gerada pelo TrickyTimeSeries, onde as mudanças foram detectadas usando o algoritmo ADWIN em combinação com Padrões Ordinais (Ordinal Patterns). Os pontos vermelhos indicam os locais onde o ADWIN detectou uma mudança. As detecções parecem estar distribuídas ao longo da série temporal, indicando que o ADWIN é sensível a várias mudanças ao longo da série.
+
+**Terceira Imagem**
+<!-- ![Plano HxC with ADWIN (TrickyTimeSeries)](attachment: file-QoN57pG2gkHD3gwlu37rLRCl) -->
+
+```{r}
+# Plotar o plano HxC
+ggplot(hxc_data1, aes(x = H, y = C)) +
+  geom_point(color = "blue") +
+  labs(title = "Plano HxC with ADWIN (TrickyTimeSeries)",
+       x = "Entropia de Shannon (H)", y = "Complexidade de Jensen-Shannon (C)") +
+  theme_minimal() +
+  geom_smooth(method = "lm", color = "red") +
+  theme_bw()
+```
+
+Esta imagem mostra o plano HxC (Entropia de Shannon x Complexidade de Jensen-Shannon) calculado para a série temporal `TrickyTimeSeries` usando janelas deslizantes. O gráfico indica a relação entre a entropia (H) e a complexidade (C) da série temporal. A linha vermelha é uma linha de tendência ajustada usando regressão linear. A distribuição dos pontos no plano HxC pode fornecer insights sobre a estrutura e a complexidade da série temporal ao longo do tempo.
+
+**Quarta Imagem**
+<!-- ![Plano HxC with ADWIN and Ordinal Patterns (TrickyTimeSeries)](attachment: file-NuDUIAzKP2ZoodXgshjusX08) -->
+
+```{r}
+# Plotar o plano HxC
+ggplot(hxc_data, aes(x = H, y = C)) +
+  geom_point(color = "blue") +
+  labs(title = "Plano HxC with ADWIN and Ordinal Patterns (TrickyTimeSeries)",
+       x = "Entropia de Shannon (H)", y = "Complexidade de Jensen-Shannon (C)") +
+  theme_minimal() +
+  geom_smooth(method = "lm", color = "red") +
+  theme_bw()
+```
+
+Esta imagem mostra o plano HxC calculado para a série temporal, desta vez usando Padrões Ordinais em combinação com ADWIN. A entropia de Shannon e a complexidade de Jensen-Shannon foram calculadas com base nos padrões ordinais em janelas deslizantes da série temporal. A linha de tendência é ajustada de maneira semelhante. Comparando com a terceira imagem, podemos ver que os padrões ordinais influenciam a distribuição dos pontos no plano HxC, possivelmente fornecendo uma visão mais detalhada da complexidade estrutural da série temporal.
+
+*Conclusão*
+
+As imagens mostram que a combinação de ADWIN com Padrões Ordinais pode detectar mudanças diferentes ao longo da série temporal em comparação com o uso de ADWIN sozinho. Além disso, a análise do plano HxC com Padrões Ordinais oferece uma visão alternativa da complexidade da série temporal, potencialmente revelando características que podem não ser evidentes apenas com ADWIN. **Essa abordagem combinada pode ser mais eficaz para detectar mudanças em séries temporais complexas, onde as mudanças não são apenas de amplitude, mas também de comportamento estrutural.**
+
+Usar padrões ordinais para ajudar na detecção de mudanças com o ADWIN pode trazer benefícios significativos, especialmente em séries temporais não estacionárias. Padrões ordinais capturam a ordem relativa dos valores na série temporal, permitindo a detecção de mudanças na estrutura da série, independentemente da escala absoluta dos valores. **Isso pode complementar a detecção de mudanças baseada em média e variância usada pelo ADWIN, proporcionando uma detecção mais robusta.**
+
+______________________________________________________________________________________________________________________________
+## Comparação dos Resultados com e sem Padrões Ordinais
+
+### Distribuição dos Pontos de Mudança
+
+- **Sem OP**: No gráfico original, os pontos de mudança estão mais concentrados em certas áreas, especialmente após a metade da série temporal.
+
+- **Com OP**: No gráfico com OP, os pontos de mudança estão mais distribuídos ao longo de toda a série temporal.
+
+### Sensibilidade à Mudança
+
+- **Sem OP**: O ADWIN detectou mudanças principalmente em regiões onde há variações abruptas na série temporal.
+
+- **Com OP**: O uso de padrões ordinais parece ter aumentado a sensibilidade do ADWIN, permitindo a detecção de mudanças mais sutis que podem não ser evidentes apenas pela análise direta dos valores da série temporal.
+
+## Interpretação das Melhorias
+
+O uso de padrões ordinais de Bandt e Pompe melhorou a detecção de mudanças de algumas maneiras importantes:
+
+### Robustez à Escala
+
+- Padrões ordinais são baseados na ordem relativa dos valores, tornando a detecção de mudanças menos suscetível a grandes variações na amplitude dos dados. Isso é útil em séries temporais onde a amplitude pode variar consideravelmente.
+
+### Captura de Estruturas Subtis
+
+- Os padrões ordinais capturam mudanças na estrutura da série temporal que podem não ser detectadas por mudanças na média ou variância. Isso inclui mudanças no comportamento ordinal dos dados.
+
+### Detecção de Mudanças Estruturais
+
+- O ADWIN combinado com padrões ordinais é capaz de detectar mudanças estruturais nos dados que não seriam óbvias apenas pela análise dos valores dos dados.
+
+### Ajuste de Parâmetros
+
+- É interessante experimentar com diferentes valores de `delta` e `emb_dim` para otimizar a sensibilidade e precisão da detecção de mudanças.
+
+### Análise Comparativa
+
+- Uma análise comparativa mais detalhada dos pontos de mudança detectados com e sem o uso de OP para entender melhor as melhorias específicas.
+
+### Aplicações Práticas
+
+**- Talvez seja interessante aplicar essa metodologia em séries temporais de outras áreas para validar a eficácia dos padrões ordinais em diferentes contextos.**
+
+O uso de padrões ordinais de Bandt e Pompe em conjunto com o ADWIN melhorou a capacidade de detecção de mudanças, tornando o algoritmo mais sensível a variações estruturais na série temporal. Isso é particularmente útil em cenários onde as mudanças não são apenas de amplitude, mas também de comportamento.
+
+
+### Detecção de Mudança com ADWIN and OP Plano HxC (TrickyTimeSeries)
+
+Em andamento ...
+
+```{r}
+
+```
+
+
